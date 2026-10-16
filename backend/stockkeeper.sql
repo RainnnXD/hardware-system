@@ -4,7 +4,8 @@
 -- Database name: stockkeeper_db  (must match $database in db.php)
 -- WARNING: the DROP TABLE statement below only affects stockkeeper_db and
 -- erases any existing Stock Keeper data. Run this file only on a new/empty
--- database or after taking a backup.
+-- database or after taking a backup. PLEASE BASAHIN NG MAAYOS.
+-- LOG#1 (FIXED NA PO): ERROR ENCOUNTERED, Table 'stockkeeper_db.settings' doesn't exist, but will be created by this script. FIX PLEASE.
 -- =============================================================================
 CREATE DATABASE IF NOT EXISTS stockkeeper_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE stockkeeper_db;
