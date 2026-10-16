@@ -1,6 +1,3 @@
-/* ============ STYLE BRIDGE ============
-   Templates describe per-element styles (dynamic colours, bar widths) with data-st.
-   This observer applies them through the CSSOM so the markup never carries inline style attributes. */
 const paint = (n) => {
   if (n.nodeType !== 1) return;
   [n, ...n.querySelectorAll("[data-st]")].forEach((x) => {
@@ -34,11 +31,8 @@ const money = (n) =>
 const now = () => new Date().toISOString().slice(0, 16).replace("T", " ");
 let nid = 100;
 
-/* ============ MOCK DATA ============
-   BACKEND PLACEHOLDER: everything in `db` is an in-memory dataset.
-   TODO: Connect Products API   (GET/POST/PUT/DELETE /api/products)
-   TODO: Connect Categories API, Suppliers API, Movements API, Sales API
-   TODO: Load Inventory from Database on page load and replace `db` */
+// MOCK DATA                               
+
 const db = {
   cats: [
     [1, "Cement & Masonry", "Portland cement, CHB, hollow blocks"],
@@ -294,7 +288,7 @@ db.sales = [
 const total = (s) => s.items.reduce((a, i) => a + i.qty * i.price, 0);
 const nm = (l, id) => (db[l].find((x) => x.id === id) || { name: "—" }).name;
 
-/* ============ UI PRIMITIVES ============ */
+
 function toast(msg, type) {
   if (
     type != "bad" &&
@@ -329,8 +323,7 @@ function ask(msg, fn) {
   };
 }
 
-/* Generic modal form builder with validation.
-   fields: {n:name,l:label,t:type,o:[[value,text]],num:1,min,step,opt:1,v:(value,all)=>errorText} */
+// GENERIC MODAL FORM BUILDER 
 function openForm(title, fs, vals, save) {
   dlg.innerHTML = `<form novalidate><h3>${title}</h3>${fs.map((f) => `<label>${f.l}${f.t == "select" ? `<select name="${f.n}">${f.o.map((o) => `<option value="${o[0]}">${e(o[1])}</option>`).join("")}</select>` : `<input name="${f.n}" type="${f.t || "text"}"${f.t == "number" ? ` min="${f.min ?? 0}" step="${f.step || 1}"` : ""}>`}<small class="er"></small></label>`).join("")}<div class="ft"><button type="button" class="b" data-x>Cancel</button><button class="b p">Save</button></div></form>`;
   const fm = dlg.querySelector("form");
@@ -426,8 +419,7 @@ function edit(s, id) {
         ? { min: db.set.reorder }
         : {};
   openForm((id ? "Edit " : "Add ") + c.t.toLowerCase(), c.f(), it, (d) => {
-    // BACKEND PLACEHOLDER: id ? PUT /api/<resource>/:id : POST /api/<resource>
-    // TODO: Connect Products API / Categories API / Suppliers API
+
     if (id) Object.assign(it, d);
     else db[c.k].push({ id: nid++, ...d });
     show(cur);
@@ -456,7 +448,7 @@ function del(s, id) {
       "bad",
     );
   ask(`Delete <b>${e(it.name)}</b>? This cannot be undone.`, () => {
-    // BACKEND PLACEHOLDER: DELETE /api/<resource>/:id
+
     db[c.k] = db[c.k].filter((x) => x.id !== id);
     show(cur);
     toast(c.t + " deleted: " + it.name);
@@ -470,7 +462,8 @@ function mk(id, type, labels, data, label) {
   ch[id] && ch[id].destroy();
   const cs = getComputedStyle(document.documentElement),
     ink = cs.getPropertyValue("--ink").trim(),
-    ln = cs.getPropertyValue("--ln").trim();
+    ln = cs.getPropertyValue("--ln").trim(),
+    ac = cs.getPropertyValue("--ac").trim();
   Chart.defaults.color = ink;
   Chart.defaults.font.family = "Plus Jakarta Sans, sans-serif";
   const pal = [
@@ -490,7 +483,7 @@ function mk(id, type, labels, data, label) {
         {
           label,
           data,
-          backgroundColor: bar ? pal[0] : pal,
+          backgroundColor: bar ? ac : pal,
           borderColor: ln,
           borderWidth: 2,
         },
@@ -527,7 +520,7 @@ const saleCols = [
 ];
 
 function rProd() {
-  // TODO: Connect Products API (replace db.prod with fetched list, server-side search optional)
+
   const sel = $("#pc"),
     cur0 = sel.value;
   sel.innerHTML =
@@ -709,8 +702,7 @@ function mvForm(type) {
     ],
     {},
     (d) => {
-      // BACKEND PLACEHOLDER: POST /api/inventory-movements, server updates stock atomically
-      // TODO: Save stock movement to Database
+
       P(d.pid).stock += out ? -d.qty : d.qty;
       db.mov.push({
         id: nid++,
@@ -762,8 +754,7 @@ function newSale() {
     ],
     {},
     (d) => {
-      // BACKEND PLACEHOLDER: POST /api/sales (one transaction: sale + line items + stock deduction)
-      // TODO: Save Sales Transaction
+
       const id = "S-" + (1001 + db.sales.length);
       db.sales.push({
         ...mkS(id, now(), d.cust, d.pay, [[d.pid, d.qty]]),
@@ -801,16 +792,12 @@ const V = [
   ["reports", "Reports", "summarize", rRep],
 ];
 let cur = "dashboard";
-/* ============ ROLES, AUTH, EMPLOYEES, LOGS, SETTINGS ============
-   BACKEND PLACEHOLDER: authentication and role verification.
-   TODO: Replace the mock login with POST /api/auth/login (returns token + role + permissions).
-   TODO: Enforce permissions on the server for every API call. The UI checks below only hide controls. */
 V.push(
   ["employees", "Employees", "badge", rEmp],
   ["logs", "Activity logs", "history", rLogs],
   ["settings", "System settings", "settings", rSet],
 );
-// Role matrix (BACKEND PLACEHOLDER: load roles/permissions from the auth API)
+// ROLE PLACEHOLDER
 const ROLE = {
   admin: "Administrator",
   manager: "Manager",
@@ -840,10 +827,9 @@ const CAN = {
 const can = (k) => !!me && CAN[k].includes(me.role);
 let me = null;
 const ADM = () => me && me.role == "admin";
-// Permission map: staff see only these modules; administrators see everything
+// PERMISSION CHECK FOR THE USERS
 const allowed = (v) => !VIEWS[me.role] || VIEWS[me.role].includes(v);
 const deny = () => toast("Permission denied: your role cannot do this", "bad");
-// TODO: Connect Employees API (GET/POST/PUT/DELETE /api/employees), Activity Logs API, Settings API
 db.emp = [
   [
     1,
@@ -976,8 +962,8 @@ S.emp = {
 };
 function log(a) {
   if (me) db.logs.push({ t: now(), u: me.name, r: me.role, a });
-} // TODO: POST /api/activity-logs
-// Sidebar is grouped like ERP menus and filtered by role
+} 
+// SIDEBAR GROUPED
 const GRP = {
     dashboard: 0,
     products: 1,
@@ -1036,7 +1022,7 @@ $("#gs").onkeydown = (ev) => {
     show("products");
   }
 };
-/* Sign up (frontend only). BACKEND PLACEHOLDER: POST /api/auth/register; in production an administrator assigns the role */
+// SIGN UP
 function signUp() {
   openForm(
     "Create account",
@@ -1141,7 +1127,7 @@ function setForm() {
     },
   );
 }
-// Stock count correction: staff and admins may update quantities; it is logged as a movement
+// STOCK COUNT CORRECTION
 function adjust(id) {
   const p = P(id);
   openForm(
@@ -1167,7 +1153,7 @@ function adjust(id) {
     },
   );
 }
-/* Notifications: derived from stock levels, plus admin-only notices (mock) */
+/* NOTIFCATIONS (MOCK ONLY)*/
 const seen = new Set();
 const notes = () => [
   ...db.prod
@@ -1229,8 +1215,6 @@ $("#lf").onsubmit = (ev) => {
     return;
   }
   er.textContent = "";
-  // BACKEND PLACEHOLDER: POST /api/auth/login {username,password} returns {token,user:{id,role,permissions}}
-  // TODO: Verify role on the server; keep the session token in a secure httpOnly cookie
   me = db.emp.find((u) => u.id == $("#lu").value);
   setRole();
   $("#login").classList.add("hide");
@@ -1401,7 +1385,7 @@ function cnt() {
     if (live) requestAnimationFrame(tick);
   })(performance.now());
 }
-// Dashboard command center. TODO: Load Inventory from Database / Sales API (aggregate endpoints) instead of computing here.
+// DASHBOARD COMMAND CENTER
 const AVC = ["#2563EB", "#EA580C", "#0D9488", "#9333EA", "#E11D48", "#0891B2"],
   ini = (n) =>
     n
@@ -1633,7 +1617,7 @@ function rHome() {
     },
   });
 }
-/* Activity timeline (Activity logs page). TODO: Activity Logs API */
+/* ACTIVITY TIMELINE */
 function tlHtml(L) {
   if (!L.length)
     return empty(
@@ -1666,7 +1650,7 @@ function tlHtml(L) {
     "</div>"
   );
 }
-/* Notification center: grouped, color-coded alerts */
+/* FOR NOTIFICATIONS */
 const NM = {
   low: ["warning", "#D97706", "Inventory"],
   out: ["error", "#B3392B", "Inventory"],
