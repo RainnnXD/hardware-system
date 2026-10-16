@@ -18,6 +18,14 @@
     0 1px 2px rgba(14, 26, 46, 0.05), 0 12px 28px -14px rgba(14, 26, 46, 0.18);
   --f: "Plus Jakarta Sans", system-ui, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, monospace;
+  --mixw: 0%;
+  --bs-body-color: var(--ink);
+  --bs-body-bg: var(--bg);
+  --bs-card-color: var(--ink);
+  --bs-card-bg: var(--pn);
+  --bs-border-color: var(--ln);
+  --bs-emphasis-color: var(--ink);
+  --bs-secondary-color: var(--mu);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -34,6 +42,7 @@
     --ot: #fbbf24;
     --ok: #34d399;
     --bd: #f87171;
+    --mixw: 48%;
     --sb: #060c1a;
     --hd: #15203a;
     --sh: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 28px -14px rgba(0, 0, 0, 0.6);
@@ -55,6 +64,7 @@
   --ot: #fbbf24;
   --ok: #34d399;
   --bd: #f87171;
+  --mixw: 48%;
   --sb: #060c1a;
   --hd: #15203a;
   --sh: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 28px -14px rgba(0, 0, 0, 0.6);
@@ -227,7 +237,7 @@ nav {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  color: #6b7fa3;
+  color: #8da1c4;
   font-weight: 700;
 }
 nav button {
@@ -358,6 +368,7 @@ body.home .ph {
 /*COMPONENTS*/
 .card,
 .w {
+  color: var(--ink);
   background: var(--pn);
   border: 1px solid var(--ln);
   border-radius: 18px;
@@ -496,6 +507,7 @@ label.e select {
 }
 table {
   width: 100%;
+  color: var(--ink);
   border-collapse: collapse;
   font-size: 13.5px;
 }
@@ -554,7 +566,7 @@ tbody tr:hover td {
   color: var(--ot);
 }
 .st {
-  color: var(--c);
+  color: color-mix(in srgb, var(--c), #fff var(--mixw));
   background: color-mix(in srgb, var(--c) 14%, transparent);
 }
 .st::before {
@@ -581,7 +593,7 @@ tbody tr:hover td {
   border-radius: 12px;
   font-weight: 800;
   font-size: 13px;
-  color: var(--c);
+  color: color-mix(in srgb, var(--c), #fff var(--mixw));
   background: color-mix(in srgb, var(--c) 14%, transparent);
 }
 .ch .ms {
@@ -783,7 +795,7 @@ dialog h3 {
   display: grid;
   place-items: center;
   border-radius: 50%;
-  color: var(--c);
+  color: color-mix(in srgb, var(--c), #fff var(--mixw));
   background: color-mix(in srgb, var(--c) 15%, var(--pn));
   box-shadow: 0 0 0 4px var(--pn);
 }
