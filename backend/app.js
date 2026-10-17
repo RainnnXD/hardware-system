@@ -1,6 +1,3 @@
-/* ============ STYLE BRIDGE ============
-   Templates describe per-element styles (dynamic colours, bar widths) with data-st.
-   This observer applies them through the CSSOM so the markup never carries inline style attributes. */
 const paint = (n) => {
   if (n.nodeType !== 1) return;
   [n, ...n.querySelectorAll("[data-st]")].forEach((x) => {
@@ -33,7 +30,28 @@ const money = (n) =>
   });
 const now = () => new Date().toISOString().slice(0, 16).replace("T", " ");
 
-/* ============ DATA (loaded from MySQL through api.php) ============ */
+// ============ PASSWORD VISIBILITY TOGGLE ============
+const PWBTN =
+  '<button type="button" class="pwt" aria-label="Show password" aria-pressed="false"><span class="ms">visibility</span></button>';
+function setPwVisible(input, show) {
+  const btn = input.parentElement.querySelector(".pwt");
+  input.type = show ? "text" : "password";
+  if (!btn) return;
+  btn.setAttribute("aria-pressed", show);
+  btn.setAttribute("aria-label", show ? "Hide password" : "Show password");
+  btn.querySelector(".ms").textContent = show ? "visibility_off" : "visibility";
+}
+document.addEventListener("mousedown", (ev) => {
+  if (ev.target.closest(".pwt")) ev.preventDefault(); /* keep focus and caret in the field */
+});
+document.addEventListener("click", (ev) => {
+  const b = ev.target.closest(".pwt");
+  if (!b) return;
+  const input = b.parentElement.querySelector("input");
+  setPwVisible(input, input.type === "password");
+});
+
+/* ============ DATA  ============ */
 const db = {
   cats: [],
   sup: [],
@@ -82,7 +100,7 @@ async function api(action, data, quiet) {
     return null;
   }
 }
-/* Reloads every table from the database and refreshes `me` from the session. */
+/* Reloads every table from the database and refreshes the session. */
 async function load(quiet) {
   const j = await api("bootstrap", null, quiet);
   if (!j) return false;
@@ -126,10 +144,9 @@ function ask(msg, fn) {
   };
 }
 
-/* Generic modal form builder with validation.
-   fields: {n:name,l:label,t:type,o:[[value,text]],num:1,min,step,opt:1,v:(value,all)=>errorText} */
+/* Generic modal form builder with validation. */
 function openForm(title, fs, vals, save) {
-  dlg.innerHTML = `<form novalidate><h3>${title}</h3>${fs.map((f) => `<label>${f.l}${f.t == "select" ? `<select name="${f.n}">${f.o.map((o) => `<option value="${o[0]}">${e(o[1])}</option>`).join("")}</select>` : `<input name="${f.n}" type="${f.t || "text"}"${f.t == "number" ? ` min="${f.min ?? 0}" step="${f.step || 1}"` : ""}>`}<small class="er"></small></label>`).join("")}<div class="ft"><button type="button" class="b" data-x>Cancel</button><button class="b p">Save</button></div></form>`;
+  dlg.innerHTML = `<form novalidate><h3>${title}</h3>${fs.map((f) => `<label>${f.l}${f.t == "select" ? `<select name="${f.n}">${f.o.map((o) => `<option value="${o[0]}">${e(o[1])}</option>`).join("")}</select>` : f.t == "password" ? `<span class="pw"><input name="${f.n}" type="password">${PWBTN}</span>` : `<input name="${f.n}" type="${f.t || "text"}"${f.t == "number" ? ` min="${f.min ?? 0}" step="${f.step || 1}"` : ""}>`}<small class="er"></small></label>`).join("")}<div class="ft"><button type="button" class="b" data-x>Cancel</button><button class="b p">Save</button></div></form>`;
   const fm = dlg.querySelector("form");
   fs.forEach((f) => {
     if (vals[f.n] !== undefined) fm.elements[f.n].value = vals[f.n];
@@ -336,7 +353,6 @@ const saleCols = [
 ];
 
 function rProd() {
-  // TODO: Connect Products API (replace db.prod with fetched list, server-side search optional)
   const sel = $("#pc"),
     cur0 = sel.value;
   sel.innerHTML =
@@ -408,7 +424,6 @@ function rSup() {
   );
 }
 function rMov() {
-  // TODO: Load Inventory from Database (GET /api/inventory-movements)
   const f = $("#mf").value;
   tbl(
     "#mtbl",
@@ -589,16 +604,13 @@ const V = [
   ["reports", "Reports", "summarize", rRep],
 ];
 let cur = "dashboard";
-/* ============ ROLES, AUTH, EMPLOYEES, LOGS, SETTINGS ============
-   BACKEND PLACEHOLDER: authentication and role verification.
-   TODO: Replace the mock login with POST /api/auth/login (returns token + role + permissions).
-   TODO: Enforce permissions on the server for every API call. The UI checks below only hide controls. */
+// ============ ROLES, AUTH, EMPLOYEES, LOGS, SETTINGS ============
 V.push(
   ["employees", "Employees", "badge", rEmp],
   ["logs", "Activity logs", "history", rLogs],
   ["settings", "System settings", "settings", rSet],
 );
-// Role matrix (BACKEND PLACEHOLDER: load roles/permissions from the auth API)
+// LOAD THE ROLES
 const ROLE = {
   admin: "Administrator",
   manager: "Manager",
@@ -628,7 +640,7 @@ const CAN = {
 const can = (k) => !!me && CAN[k].includes(me.role);
 let me = null;
 const ADM = () => me && me.role == "admin";
-// Permission map: staff see only these modules; administrators see everything
+// PERMISSION MAP, USED TO FILTER WHAT ROLES CAN DO CERTAIN THINGS
 const allowed = (v) => !VIEWS[me.role] || VIEWS[me.role].includes(v);
 const deny = () => toast("Permission denied: your role cannot do this", "bad");
 S.emp = {
@@ -655,7 +667,7 @@ function log(a) {
   db.logs.push({ t: now(), u: me.name, r: me.role, a });
   api("log", { text: a }, true); // saved to activity_logs
 }
-// Sidebar is grouped like ERP menus and filtered by role
+// Sidebar is grouped and filtered by role
 const GRP = {
     dashboard: 0,
     products: 1,
@@ -714,7 +726,7 @@ $("#gs").onkeydown = (ev) => {
     show("products");
   }
 };
-/* Sign up (frontend only). BACKEND PLACEHOLDER: POST /api/auth/register; in production an administrator assigns the role */
+/* SIGN UP - FRONT END ONLY [REMINDER TO ADD BACKEND AUTHORIZATION FOR THIS FEATURE] */
 function signUp() {
   openForm(
     "Create account",
@@ -822,7 +834,7 @@ function setForm() {
     },
   );
 }
-// Stock count correction: staff and admins may update quantities; it is logged as a movement
+// STOCK COUNT CORRECTION
 function adjust(id) {
   const p = P(id);
   openForm(
@@ -838,7 +850,7 @@ function adjust(id) {
     },
   );
 }
-/* Notifications: derived from stock levels, plus admin-only notices (mock) */
+/* MOCK NOTIFICATIONS */
 const seen = new Set();
 const notes = () => [
   ...db.prod
@@ -882,7 +894,7 @@ document.addEventListener("click", (ev) => {
     $$(".pop").forEach((p) => p.classList.add("hide"));
 });
 ["#eq", "#lq"].forEach((s) => ($(s).oninput = () => show(cur)));
-/* Login: the password is checked by api.php (password_verify against users.password_hash) */
+/* LOGIN PASSWORD CHECKED AGAINST THE HASH*/
 function buildLogin() {
   $("#lu").innerHTML = db.emp
     .filter((u) => u.status == "Active")
@@ -891,6 +903,7 @@ function buildLogin() {
     )
     .join("");
   $("#lp").value = "";
+  setPwVisible($("#lp"), false);
 }
 async function initLogin() {
   const j = await api("login_users");
@@ -1080,7 +1093,7 @@ function cnt() {
     el.append(sp);
     return { sp, to, f, last: "" };
   });
-  // Reserve the final width up front so nothing around the number can move.
+  // NUMBER ANIMATIONN CHUCHU
   items.forEach((i) => {
     i.sp.style.minWidth = Math.ceil(i.sp.getBoundingClientRect().width) + "px";
   });
@@ -1104,7 +1117,7 @@ function cnt() {
     if (live) requestAnimationFrame(tick);
   })(performance.now());
 }
-// Dashboard command center. TODO: Load Inventory from Database / Sales API (aggregate endpoints) instead of computing here.
+// DASHBOARD COMMAND CENTER
 const AVC = ["#2563EB", "#EA580C", "#0D9488", "#9333EA", "#E11D48", "#0891B2"],
   ini = (n) =>
     n
@@ -1336,7 +1349,7 @@ function rHome() {
     },
   });
 }
-/* Activity timeline (Activity logs page). TODO: Activity Logs API */
+/* ACTIVITY TIMELINE */
 function tlHtml(L) {
   if (!L.length)
     return empty(
@@ -1369,7 +1382,7 @@ function tlHtml(L) {
     "</div>"
   );
 }
-/* Notification center: grouped, color-coded alerts */
+/* NOTIF CENTER */
 const NM = {
   low: ["warning", "#D97706", "Inventory"],
   out: ["error", "#B3392B", "Inventory"],
