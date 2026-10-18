@@ -1471,3 +1471,9 @@ tr.arch td {
 tr.arch td.act {
   opacity: 1;
 }
+
+/*SIDEBAR ACCOUNT LINKS (Profile, Settings, Logout)*/
+nav.sfn {
+  flex: none;
+  padding-bottom: 4px;
+}

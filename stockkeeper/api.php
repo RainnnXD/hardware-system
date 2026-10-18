@@ -61,13 +61,16 @@ function current_user() {
     if ($u !== false) return $u;
     $u = null;
     if (!empty($_SESSION["uid"])) {
-        $r = rows("SELECT user_id, full_name, job_title, role_id, status FROM users WHERE user_id = ?", "i", [$_SESSION["uid"]])[0] ?? null;
+        $r = rows("SELECT user_id, full_name, username, email, phone, job_title, role_id, status FROM users WHERE user_id = ?", "i", [$_SESSION["uid"]])[0] ?? null;
         if ($r && $r["status"] === "Active") {
             $u = [
-                "id"    => (int)$r["user_id"],
-                "name"  => $r["full_name"],
-                "title" => $r["job_title"] ?? "",
-                "role"  => $ROLE_KEY[(int)$r["role_id"]],
+                "id"       => (int)$r["user_id"],
+                "name"     => $r["full_name"],
+                "username" => $r["username"],
+                "email"    => $r["email"],
+                "phone"    => $r["phone"] ?? "",
+                "title"    => $r["job_title"] ?? "",
+                "role"     => $ROLE_KEY[(int)$r["role_id"]],
             ];
         }
     }
@@ -109,6 +112,10 @@ function make_user($name, $title, $roleKey, $pw, $phone = null, $status = "Activ
 function other_active_admins($excludeId) {
     return (int)rows("SELECT COUNT(*) c FROM users WHERE role_id = 1 AND status = 'Active' AND user_id <> ?", "i", [$excludeId])[0]["c"];
 }
+
+/* strict validators (same rules as app.js) */
+function valid_email($e) { return filter_var($e, FILTER_VALIDATE_EMAIL) !== false && strlen($e) <= 120; }
+function valid_ph_phone($p) { return preg_match('/^09\d{9}$/', $p) === 1; } // 09XXXXXXXXX, 11 digits
 
 /* ---------- archive / restore (replaces permanent delete) ----------
    Records are never removed. Archiving sets archived_at; restoring clears it.
@@ -236,17 +243,17 @@ case "bootstrap":
 
     // "arch" = true when the record is archived (hidden by default, restorable)
     $data["cats"] = array_map(fn($r) => ["id" => (int)$r["category_id"], "name" => $r["category_name"], "desc" => $r["description"] ?? "", "arch" => (bool)$r["arch"]],
-        rows("SELECT category_id, category_name, description, archived_at IS NOT NULL AS arch FROM categories ORDER BY category_id"));
+        rows("SELECT category_id, category_name, description, archived_at IS NOT NULL AS arch FROM categories ORDER BY category_id DESC"));
 
     $data["sup"] = array_map(fn($r) => ["id" => (int)$r["supplier_id"], "name" => $r["company_name"], "contact" => $r["contact_person"],
         "phone" => $r["phone"], "email" => $r["email"] ?? "", "city" => $r["address"], "arch" => (bool)$r["arch"]],
-        rows("SELECT supplier_id, company_name, contact_person, phone, email, address, archived_at IS NOT NULL AS arch FROM suppliers ORDER BY supplier_id"));
+        rows("SELECT supplier_id, company_name, contact_person, phone, email, address, archived_at IS NOT NULL AS arch FROM suppliers ORDER BY supplier_id DESC"));
 
     $data["prod"] = array_map(fn($r) => ["id" => (int)$r["product_id"], "sku" => $r["sku"], "name" => $r["product_name"],
         "cat" => (int)$r["category_id"], "sup" => (int)$r["supplier_id"], "price" => (float)$r["unit_price"],
         "stock" => (int)$r["stock_quantity"], "min" => (int)$r["reorder_level"], "unit" => $r["unit"], "arch" => (bool)$r["arch"]],
         rows("SELECT product_id, sku, product_name, category_id, supplier_id, unit_price, stock_quantity, reorder_level, unit, archived_at IS NOT NULL AS arch
-              FROM products ORDER BY product_id"));
+              FROM products ORDER BY product_id DESC"));
 
     $data["mov"] = array_map(fn($r) => ["id" => (int)$r["movement_id"], "date" => $r["d"], "pid" => (int)$r["product_id"],
         "type" => substr($r["movement_type"], -2) === "IN" ? "IN" : "OUT", "qty" => (int)$r["quantity"],
@@ -274,7 +281,7 @@ case "bootstrap":
     if ($u["role"] === "admin") {
         $data["emp"] = array_map(fn($r) => ["id" => (int)$r["user_id"], "name" => $r["full_name"], "title" => $r["job_title"] ?? "",
             "role" => $ROLE_KEY[(int)$r["role_id"]], "phone" => $r["phone"] ?: "—", "status" => $r["status"], "arch" => (bool)$r["arch"]],
-            rows("SELECT user_id, full_name, job_title, role_id, phone, status, archived_at IS NOT NULL AS arch FROM users ORDER BY user_id"));
+            rows("SELECT user_id, full_name, job_title, role_id, phone, status, archived_at IS NOT NULL AS arch FROM users ORDER BY user_id DESC"));
     }
     $data["logs"] = [];
     if (in_array($u["role"], ["admin", "manager"])) {
@@ -342,6 +349,8 @@ case "save_supplier":
     $phone = $str("phone", 30); $email = $str("email", 120);
     $email = $email === "" ? null : $email;
     if ($name === "" || $contact === "" || $city === "" || $phone === "") fail("Company, contact, city and phone are required");
+    if (!valid_ph_phone($phone)) fail("Enter a valid Philippine mobile number (09XXXXXXXXX)");
+    if ($email !== null && !valid_email($email)) fail("Enter a valid email address");
     if ($id) run("UPDATE suppliers SET company_name=?, contact_person=?, phone=?, email=?, address=? WHERE supplier_id=?",
                  "sssssi", [$name, $contact, $phone, $email, $city, $id]);
     else     run("INSERT INTO suppliers (company_name, contact_person, phone, email, address) VALUES (?, ?, ?, ?, ?)",
@@ -356,6 +365,7 @@ case "save_employee":
     $phone = $str("phone", 30); $status = $str("status", 10) ?: "Active";
     if ($phone === "" || $phone === "—") $phone = null;
     if ($name === "") fail("Full name is required");
+    if ($phone !== null && !valid_ph_phone($phone)) fail("Enter a valid Philippine mobile number (09XXXXXXXXX)");
     if (!isset($ROLE_ID[$role])) fail("Invalid role");
     if (!in_array($status, ["Active", "Inactive"])) fail("Invalid status");
     if ($id) {
@@ -440,6 +450,29 @@ case "add_sale":
         "iiis", [$pid, $u["id"], $qty, "Sale " . $receipt]);
     $conn->commit();
     out(["receipt" => $receipt]);
+
+/* ====================== MY ACCOUNT (any signed-in user) ====================== */
+case "update_profile":
+    $u = need();
+    $name = $str("name", 100); $title = $str("title", 80);
+    $email = $str("email", 120); $phone = $str("phone", 30);
+    if ($name === "") fail("Full name is required");
+    if (!valid_email($email)) fail("Enter a valid email address");
+    if (!valid_ph_phone($phone)) fail("Enter a valid Philippine mobile number (09XXXXXXXXX)");
+    run("UPDATE users SET full_name=?, job_title=?, email=?, phone=? WHERE user_id=?", "ssssi",
+        [$name, $title === "" ? null : $title, $email, $phone, $u["id"]]);
+    out(["ok" => true]);
+
+case "change_password":
+    $u = need();
+    $cur = (string)($in["current"] ?? "");
+    $new = (string)($in["password"] ?? "");
+    if (strlen($new) < 6) fail("Use at least 6 characters for the new password");
+    $r = rows("SELECT password_hash FROM users WHERE user_id = ?", "i", [$u["id"]])[0] ?? null;
+    if (!$r || !password_verify($cur, $r["password_hash"])) fail("Current password is incorrect", 403); // 403, not 401, so the app does not sign the user out
+    run("UPDATE users SET password_hash = ? WHERE user_id = ?", "si", [password_hash($new, PASSWORD_BCRYPT), $u["id"]]);
+    session_regenerate_id(true);
+    out(["ok" => true]);
 
 /* ====================== SETTINGS & LOGS ====================== */
 case "save_settings":

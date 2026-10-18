@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -43,11 +43,19 @@
     <aside>
       <div class="brand">
         <span class="ms">construction</span>
-        <div>
-          <b>Stock Keeper</b><small>Building supply · Laguna</small>
-        </div>
+        <div><b>Stock Keeper</b><small>Building supply · Laguna</small></div>
       </div>
       <nav id="nav"></nav>
+      <nav class="sfn" id="sfn">
+        <div class="ng">Account</div>
+        <button data-v="profile">
+          <span class="ms">account_circle</span>Profile
+        </button>
+        <button data-v="settings">
+          <span class="ms">settings</span>Settings
+        </button>
+        <button data-a="out"><span class="ms">logout</span>Logout</button>
+      </nav>
       <div class="sf" id="sf"></div>
     </aside>
     <div id="ov"></div>
@@ -72,13 +80,6 @@
         <button class="b" id="th" aria-label="Toggle dark mode">
           <span class="ms">contrast</span>
         </button>
-        <div class="rel">
-          <button class="b" id="pb" aria-label="Account menu">
-            <span class="ms">account_circle</span>
-            <span class="un" id="un"></span>
-          </button>
-          <div class="pop hide" id="pm"></div>
-        </div>
       </header>
 
       <div class="ph">
@@ -193,19 +194,13 @@
             <option value="">Active</option>
             <option value="arch">Archived</option>
             <option value="all">Active + archived</option></select
-          ><button
-            class="b p"
-            data-a="edit"
-            data-s="emp"
-          >
-            Add employee
-          </button>
+          ><button class="b p" data-a="edit" data-s="emp">Add employee</button>
         </div>
         <div class="card tw" id="etbl"></div>
         <p class="mu">
           Administrators have full access. Staff can view products, process
-          sales and manage stock. Inactive and archived accounts cannot sign
-          in. Archived accounts keep their history and can be restored.
+          sales and manage stock. Inactive and archived accounts cannot sign in.
+          Archived accounts keep their history and can be restored.
         </p>
       </section>
       <section class="v" id="logs">
@@ -214,20 +209,32 @@
         </div>
         <div class="card tw" id="ltbl"></div>
       </section>
+      <section class="v" id="profile">
+        <div class="card">
+          <h3>My profile</h3>
+          <div id="profv"></div>
+        </div>
+      </section>
       <section class="v" id="settings">
         <div class="card">
-          <h3>Store settings</h3>
+          <h3>Personal details</h3>
           <div id="setv"></div>
           <div class="bar bar-flush">
-            <button class="b p" data-a="set">Edit settings</button>
+            <button class="b p" data-a="myinfo">Edit my details</button>
+            <button class="b" data-a="mypw">Change password</button>
           </div>
         </div>
         <div class="card gap-top">
-          <h3>Integrations</h3>
+          <h3>Account</h3>
           <p class="mu flush">
-            Authentication, role verification, database and API connections are
-            managed by your system administrator.
+            Deactivating signs you out. An administrator must reactivate your
+            account.
           </p>
+          <div class="bar bar-flush">
+            <button class="b d" data-a="deactivate">
+              Deactivate my account
+            </button>
+          </div>
         </div>
       </section>
     </main>
@@ -268,12 +275,23 @@
               autocapitalize="none"
               autocorrect="off"
               spellcheck="false"
-              placeholder="e.g. juan.delacruz"
-          /></label
+              placeholder="e.g. juan.delacruz" /></label
           ><label
-            >Password<span class="pw"><input id="lp" type="password" autocomplete="current-password" /><button type="button" class="pwt" aria-label="Show password" aria-pressed="false"><span class="ms">visibility</span></button></span><small
-              class="er"
-            ></small></label
+            >Password<span class="pw"
+              ><input
+                id="lp"
+                type="password"
+                autocomplete="current-password"
+                placeholder="Enter your password"
+              /><button
+                type="button"
+                class="pwt"
+                aria-label="Show password"
+                aria-pressed="false"
+              >
+                <span class="ms">visibility</span>
+              </button></span
+            ><small class="er"></small></label
           ><button class="b p w-100 mt-2">Sign in</button
           ><button type="button" class="b w-100 mt-2" data-a="signup">
             Create an account

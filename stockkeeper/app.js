@@ -42,7 +42,8 @@ function setPwVisible(input, show) {
   btn.querySelector(".ms").textContent = show ? "visibility_off" : "visibility";
 }
 document.addEventListener("mousedown", (ev) => {
-  if (ev.target.closest(".pwt")) ev.preventDefault(); /* keep focus and caret in the field */
+  if (ev.target.closest(".pwt"))
+    ev.preventDefault(); /* keep focus and caret in the field */
 });
 document.addEventListener("click", (ev) => {
   const b = ev.target.closest(".pwt");
@@ -82,7 +83,14 @@ async function api(action, data, quiet) {
       j = JSON.parse(txt);
     } catch (_) {
       if (!quiet)
-        toast("PHP error: " + txt.replace(/<[^>]*>/g, " ").trim().slice(0, 160), "bad");
+        toast(
+          "PHP error: " +
+            txt
+              .replace(/<[^>]*>/g, " ")
+              .trim()
+              .slice(0, 160),
+          "bad",
+        );
       return null;
     }
     if (!r.ok || j.error) {
@@ -99,7 +107,8 @@ async function api(action, data, quiet) {
     return j;
   } catch (_) {
     api.last = { status: 0 };
-    if (!quiet) toast("Cannot reach the server. Is Apache/MySQL running?", "bad");
+    if (!quiet)
+      toast("Cannot reach the server. Is Apache/MySQL running?", "bad");
     return null;
   }
 }
@@ -162,34 +171,60 @@ function ask(msg, fn, label) {
 }
 
 /* Generic modal form builder with validation. */
+const EMAIL_RE =
+  /^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/;
+const PH_RE = /^09\d{9}$/; /* 09XXXXXXXXX, exactly 11 digits */
 function openForm(title, fs, vals, save) {
-  dlg.innerHTML = `<form novalidate><h3>${title}</h3>${fs.map((f) => `<label>${f.l}${f.t == "select" ? `<select name="${f.n}">${f.o.map((o) => `<option value="${o[0]}">${e(o[1])}</option>`).join("")}</select>` : f.t == "password" ? `<span class="pw"><input name="${f.n}" type="password">${PWBTN}</span>` : `<input name="${f.n}" type="${f.t || "text"}"${f.t == "number" ? ` min="${f.min ?? 0}" step="${f.step || 1}"` : ""}>`}<small class="er"></small></label>`).join("")}<div class="ft"><button type="button" class="b" data-x>Cancel</button><button class="b p">Save</button></div></form>`;
+  const ph = (f) => (f.ph ? ` placeholder="${e(f.ph)}"` : "");
+  dlg.innerHTML = `<form novalidate><h3>${title}</h3>${fs.map((f) => `<label>${f.l}${f.t == "select" ? `<select name="${f.n}">${f.ph ? `<option value="" disabled selected hidden>${e(f.ph)}</option>` : ""}${f.o.map((o) => `<option value="${o[0]}">${e(o[1])}</option>`).join("")}</select>` : f.t == "password" ? `<span class="pw"><input name="${f.n}" type="password"${ph(f)}>${PWBTN}</span>` : `<input name="${f.n}" type="${f.t || "text"}"${ph(f)}${f.t == "number" ? ` min="${f.min ?? 0}" step="${f.step || 1}"` : ""}${f.t == "tel" ? ' inputmode="numeric" maxlength="11" autocomplete="tel"' : ""}>`}<small class="er"></small></label>`).join("")}<div class="ft"><button type="button" class="b" data-x>Cancel</button><button class="b p">Save</button></div></form>`;
   const fm = dlg.querySelector("form");
   fs.forEach((f) => {
-    if (vals[f.n] !== undefined) fm.elements[f.n].value = vals[f.n];
+    let v = vals[f.n];
+    if (v === undefined) return;
+    if (f.t == "tel") v = v == "—" ? "" : String(v).replace(/[\s()-]/g, "");
+    fm.elements[f.n].value = v;
   });
-  fm.onsubmit = (ev) => {
-    ev.preventDefault();
+  const read = () => {
     const d = {};
-    let bad = 0;
     fs.forEach((f) => {
       const x = fm.elements[f.n].value.trim();
       d[f.n] = f.t == "number" || f.num ? (x === "" ? NaN : +x) : x;
     });
+    return d;
+  };
+  const lab = (f) => fm.elements[f.n].closest("label");
+  /* returns true when the field is INVALID, and paints/clears the red state */
+  const check = (f, d) => {
+    const x = d[f.n],
+      empty = x === "" || Number.isNaN(x);
+    let m = "";
+    if (empty && !f.opt) m = "This field is required";
+    else if (!empty && f.t == "number" && x < (f.min ?? 0))
+      m = "Enter at least " + (f.min ?? 0);
+    else if (!empty && f.t == "email" && !EMAIL_RE.test(x))
+      m = "Enter a valid email address (e.g. name@example.com)";
+    else if (!empty && f.t == "tel" && !PH_RE.test(x))
+      m = "Enter an 11-digit mobile number starting with 09 (09XXXXXXXXX)";
+    else if (!empty && f.v) m = f.v(x, d) || "";
+    lab(f).classList.toggle("e", !!m);
+    lab(f).querySelector(".er").textContent = m;
+    return !!m;
+  };
+  /* leaving a filled field validates it; flagged fields stay red until they are valid */
+  fm.addEventListener("focusout", (ev) => {
+    const f = fs.find((x) => x.n == ev.target.name);
+    if (f && ev.target.value.trim() !== "") check(f, read());
+  });
+  fm.addEventListener("input", () => {
+    const d = read();
+    fs.forEach((f) => lab(f).classList.contains("e") && check(f, d));
+  });
+  fm.onsubmit = (ev) => {
+    ev.preventDefault();
+    const d = read();
+    let bad = 0;
     fs.forEach((f) => {
-      const x = d[f.n],
-        empty = x === "" || Number.isNaN(x);
-      let m = "";
-      if (empty && !f.opt) m = "This field is required";
-      else if (!empty && f.t == "number" && x < (f.min ?? 0))
-        m = "Enter at least " + (f.min ?? 0);
-      else if (!empty && f.t == "email" && !/^\S+@\S+\.\S+$/.test(x))
-        m = "Enter a valid email address";
-      else if (!empty && f.v) m = f.v(x, d) || "";
-      const lb = fm.elements[f.n].closest("label");
-      lb.classList.toggle("e", !!m);
-      lb.querySelector(".er").textContent = m;
-      if (m) bad++;
+      if (check(f, d)) bad++;
     });
     if (bad) return toast("Fix the highlighted fields", "bad");
     dlg.close();
@@ -204,13 +239,14 @@ const S = {
     k: "prod",
     t: "Product",
     f: () => [
-      { n: "sku", l: "SKU" },
-      { n: "name", l: "Product name" },
+      { n: "sku", l: "SKU", ph: "e.g. CM-1001" },
+      { n: "name", l: "Product name", ph: "e.g. Portland Cement 40 kg" },
       {
         n: "cat",
         l: "Category",
         t: "select",
         num: 1,
+        ph: "Select a category",
         o: actv("cats").map((c) => [c.id, c.name]),
       },
       {
@@ -218,35 +254,53 @@ const S = {
         l: "Supplier",
         t: "select",
         num: 1,
+        ph: "Select a supplier",
         o: actv("sup").map((c) => [c.id, c.name]),
       },
-      { n: "price", l: "Unit price (₱)", t: "number", min: 0.01, step: ".01" },
-      { n: "stock", l: "Stock on hand", t: "number" },
-      { n: "min", l: "Reorder level", t: "number" },
-      { n: "unit", l: "Unit (pcs, kg, roll)" },
+      {
+        n: "price",
+        l: "Unit price (₱)",
+        t: "number",
+        min: 0.01,
+        step: ".01",
+        ph: "e.g. 265.00",
+      },
+      { n: "stock", l: "Stock on hand", t: "number", ph: "e.g. 100" },
+      { n: "min", l: "Reorder level", t: "number", ph: "e.g. 20" },
+      { n: "unit", l: "Unit (pcs, kg, roll)", ph: "e.g. bag, pcs, kg" },
     ],
   },
   cat: {
     k: "cats",
     t: "Category",
     f: () => [
-      { n: "name", l: "Category name" },
-      { n: "desc", l: "Description", opt: 1 },
+      { n: "name", l: "Category name", ph: "e.g. Cement & Masonry" },
+      {
+        n: "desc",
+        l: "Description",
+        opt: 1,
+        ph: "Short description (optional)",
+      },
     ],
   },
   sup: {
     k: "sup",
     t: "Supplier",
     f: () => [
-      { n: "name", l: "Company" },
-      { n: "contact", l: "Contact person" },
-      { n: "city", l: "City / Province" },
-      { n: "phone", l: "Phone" },
-      { n: "email", l: "Email", t: "email" },
+      { n: "name", l: "Company", ph: "e.g. Calamba Cement & Masonry Depot" },
+      { n: "contact", l: "Contact person", ph: "e.g. Juan Dela Cruz" },
+      { n: "city", l: "City / Province", ph: "e.g. Calamba City, Laguna" },
+      { n: "phone", l: "Phone", t: "tel", ph: "09XXXXXXXXX" },
+      { n: "email", l: "Email", t: "email", ph: "name@company.com" },
     ],
   },
 };
-const API = { prod: "product", cat: "category", sup: "supplier", emp: "employee" };
+const API = {
+  prod: "product",
+  cat: "category",
+  sup: "supplier",
+  emp: "employee",
+};
 function edit(s, id) {
   if (!can(s == "emp" ? "users" : "manage")) return deny();
   if (s == "emp" && id === me.id)
@@ -263,6 +317,7 @@ function edit(s, id) {
       n: "pw",
       l: "Password",
       t: "password",
+      ph: "At least 6 characters",
       v: (x) => (x.length < 6 ? "Use at least 6 characters" : ""),
     });
   openForm((id ? "Edit " : "Add ") + c.t.toLowerCase(), fs, it, async (d) => {
@@ -385,7 +440,10 @@ function rProd() {
   sel.innerHTML =
     '<option value="">All categories</option>' +
     db.cats
-      .map((c) => `<option value="${c.id}">${e(c.name)}${c.arch ? " (archived)" : ""}</option>`)
+      .map(
+        (c) =>
+          `<option value="${c.id}">${e(c.name)}${c.arch ? " (archived)" : ""}</option>`,
+      )
       .join("");
   sel.value = cur0;
   const q = $("#pq").value.toLowerCase(),
@@ -427,7 +485,11 @@ function rCat() {
     [
       ["Category", (c) => `<b>${e(c.name)}</b>${archTag(c)}`],
       ["Description", (c) => e(c.desc || "")],
-      ["Products", (c) => actv("prod").filter((p) => p.cat === c.id).length, "m"],
+      [
+        "Products",
+        (c) => actv("prod").filter((p) => p.cat === c.id).length,
+        "m",
+      ],
       ["", (c) => acts("cat", c.id), "act"],
     ],
     db.cats.filter(arf("#ca")),
@@ -449,7 +511,11 @@ function rSup() {
       ["City", (s) => e(s.city || "—")],
       ["Phone", (s) => e(s.phone), "m"],
       ["Email", (s) => e(s.email)],
-      ["Products", (s) => actv("prod").filter((p) => p.sup === s.id).length, "m"],
+      [
+        "Products",
+        (s) => actv("prod").filter((p) => p.sup === s.id).length,
+        "m",
+      ],
       ["", (s) => acts("sup", s.id), "act"],
     ],
     db.sup.filter(arf("#sa")),
@@ -486,7 +552,9 @@ function rSales() {
   );
 }
 function rRep() {
-  const rows = actv("prod").slice().sort((a, b) => a.sku.localeCompare(b.sku));
+  const rows = actv("prod")
+    .slice()
+    .sort((a, b) => a.sku.localeCompare(b.sku));
   tbl(
     "#rinv",
     [
@@ -544,6 +612,7 @@ function mvForm(type) {
         l: "Product",
         t: "select",
         num: 1,
+        ph: "Select a product",
         o: actv("prod").map((p) => [
           p.id,
           `${p.sku} – ${p.name} (${p.stock} on hand)`,
@@ -554,6 +623,7 @@ function mvForm(type) {
         l: "Quantity",
         t: "number",
         min: 1,
+        ph: "e.g. 10",
         v: (x, d) =>
           out && x > P(d.pid).stock ? `Only ${P(d.pid).stock} on hand` : "",
       },
@@ -563,12 +633,20 @@ function mvForm(type) {
           ? "Reason (job site, damage, transfer)"
           : "Reference (PO or delivery no.)",
         opt: 1,
+        ph: out
+          ? "e.g. Job site, damaged, transfer"
+          : "e.g. PO-2226 or delivery no.",
       },
     ],
     {},
     async (d) => {
       if (
-        !(await api("add_movement", { pid: d.pid, type, qty: d.qty, note: d.note }))
+        !(await api("add_movement", {
+          pid: d.pid,
+          type,
+          qty: d.qty,
+          note: d.note,
+        }))
       )
         return;
       await load();
@@ -583,12 +661,13 @@ function newSale() {
   openForm(
     "New sale",
     [
-      { n: "cust", l: "Customer" },
+      { n: "cust", l: "Customer", ph: "e.g. Walk-in or customer name" },
       {
         n: "pid",
         l: "Product",
         t: "select",
         num: 1,
+        ph: "Select a product",
         o: actv("prod").map((p) => [
           p.id,
           `${p.name} – ${money(p.price)} (${p.stock} in stock)`,
@@ -599,6 +678,7 @@ function newSale() {
         l: "Quantity",
         t: "number",
         min: 1,
+        ph: "e.g. 5",
         v: (x, d) =>
           x > P(d.pid).stock ? `Only ${P(d.pid).stock} in stock` : "",
       },
@@ -606,6 +686,7 @@ function newSale() {
         n: "pay",
         l: "Payment method",
         t: "select",
+        ph: "Select payment method",
         o: ["Cash", "GCash", "Maya", "Bank transfer", "Charge account"].map(
           (x) => [x, x],
         ),
@@ -613,7 +694,12 @@ function newSale() {
     ],
     {},
     async (d) => {
-      const j = await api("add_sale", { cust: d.cust, pid: d.pid, qty: d.qty, pay: d.pay });
+      const j = await api("add_sale", {
+        cust: d.cust,
+        pid: d.pid,
+        qty: d.qty,
+        pay: d.pay,
+      });
       if (!j) return;
       await load();
       show(cur);
@@ -642,7 +728,8 @@ let cur = "dashboard";
 V.push(
   ["employees", "Employees", "badge", rEmp],
   ["logs", "Activity logs", "history", rLogs],
-  ["settings", "System settings", "settings", rSet],
+  ["settings", "Settings", "settings", rSet],
+  ["profile", "Profile", "account_circle", rProfile],
 );
 // LOAD THE ROLES
 const ROLE = {
@@ -675,16 +762,26 @@ const can = (k) => !!me && CAN[k].includes(me.role);
 let me = null;
 const ADM = () => me && me.role == "admin";
 // PERMISSION MAP, USED TO FILTER WHAT ROLES CAN DO CERTAIN THINGS
-const allowed = (v) => !VIEWS[me.role] || VIEWS[me.role].includes(v);
+const allowed = (v) =>
+  v == "profile" ||
+  v == "settings" ||
+  !VIEWS[me.role] ||
+  VIEWS[me.role].includes(v);
 const deny = () => toast("Permission denied: your role cannot do this", "bad");
 S.emp = {
   k: "emp",
   t: "Employee",
   f: () => [
-    { n: "name", l: "Full name" },
-    { n: "title", l: "Position" },
-    { n: "role", l: "Role", t: "select", o: Object.entries(ROLE) },
-    { n: "phone", l: "Phone" },
+    { n: "name", l: "Full name", ph: "e.g. Maria Santos" },
+    { n: "title", l: "Position", ph: "e.g. Cashier" },
+    {
+      n: "role",
+      l: "Role",
+      t: "select",
+      ph: "Select a role",
+      o: Object.entries(ROLE),
+    },
+    { n: "phone", l: "Phone", t: "tel", ph: "09XXXXXXXXX" },
     {
       n: "status",
       l: "Status",
@@ -712,7 +809,8 @@ const GRP = {
     reports: 4,
     employees: 5,
     logs: 5,
-    settings: 5,
+    settings: 6,
+    profile: 6,
   },
   GN = [
     "Overview",
@@ -721,10 +819,13 @@ const GRP = {
     "Sales",
     "Analytics",
     "Administration",
+    "Account",
   ];
 function buildNav() {
   let g = -1;
-  $("#nav").innerHTML = V.filter((a) => allowed(a[0]))
+  $("#nav").innerHTML = V.filter(
+    (a) => allowed(a[0]) && a[0] != "profile" && a[0] != "settings",
+  )
     .sort((a, b) => GRP[a[0]] - GRP[b[0]])
     .map((a) => {
       const h = GRP[a[0]] != g ? `<div class="ng">${GN[GRP[a[0]]]}</div>` : "";
@@ -765,24 +866,27 @@ function signUp() {
   openForm(
     "Create account",
     [
-      { n: "name", l: "Full name" },
-      { n: "title", l: "Position" },
+      { n: "name", l: "Full name", ph: "e.g. Maria Santos" },
+      { n: "title", l: "Position", ph: "e.g. Cashier" },
       {
         n: "role",
         l: "Role",
         t: "select",
+        ph: "Select a role",
         o: Object.entries(ROLE).filter((r) => r[0] != "admin"),
       },
       {
         n: "pw",
         l: "Password",
         t: "password",
+        ph: "At least 6 characters",
         v: (x) => (x.length < 6 ? "Use at least 6 characters" : ""),
       },
       {
         n: "pw2",
         l: "Confirm password",
         t: "password",
+        ph: "Re-enter your password",
         v: (x, d) => (x !== d.pw ? "Passwords do not match" : ""),
       },
     ],
@@ -798,7 +902,11 @@ function signUp() {
       await initLogin();
       $("#lu").value = j.username || "";
       $("#lp").focus();
-      toast("Account created. Your username is " + j.username + ". Sign in to continue.");
+      toast(
+        "Account created. Your username is " +
+          j.username +
+          ". Sign in to continue.",
+      );
     },
   );
 }
@@ -841,16 +949,80 @@ function rLogs() {
     db.logs.filter((l) => (l.u + l.a).toLowerCase().includes(q)).reverse(),
   );
 }
+/* SETTINGS = the signed-in employee's own details (name, position, email, phone, password) */
 function rSet() {
-  const s = db.set;
   $("#setv").innerHTML = `<table><tbody>${[
-    ["Store name", s.store],
-    ["VAT included in prices", s.tax + "%"],
-    ["Default reorder level", s.reorder],
-    ["Receipt footer", s.footer || "—"],
+    ["Full name", me.name],
+    ["Position", me.title || "—"],
+    ["Email", me.email || "—"],
+    ["Mobile number", me.phone || "—"],
+    ["Password", "••••••••"],
   ]
     .map((r) => `<tr><td><b>${r[0]}</b></td><td>${e(r[1])}</td></tr>`)
     .join("")}</tbody></table>`;
+}
+function rProfile() {
+  $("#profv").innerHTML =
+    `<div class="pn" data-st="margin-bottom:14px">${av(me.name)}<div><b>${e(me.name)}</b><div class="mu2">${e(me.title || "—")} · ${ROLE[me.role]}</div></div></div><table><tbody>${[
+      ["Username", me.username],
+      ["Email", me.email || "—"],
+      ["Mobile number", me.phone || "—"],
+      ["Role", ROLE[me.role]],
+    ]
+      .map((r) => `<tr><td><b>${r[0]}</b></td><td>${e(r[1])}</td></tr>`)
+      .join("")}</tbody></table>`;
+}
+function editMyInfo() {
+  openForm(
+    "Edit my details",
+    [
+      { n: "name", l: "Full name", ph: "e.g. Maria Santos" },
+      { n: "title", l: "Position", opt: 1, ph: "e.g. Cashier" },
+      { n: "email", l: "Email address", t: "email", ph: "name@example.com" },
+      { n: "phone", l: "Mobile number", t: "tel", ph: "09XXXXXXXXX" },
+    ],
+    { name: me.name, title: me.title, email: me.email, phone: me.phone },
+    async (d) => {
+      if (!(await api("update_profile", d))) return;
+      await load();
+      setRole();
+      show(cur);
+      toast("Your details were updated");
+    },
+  );
+}
+function changeMyPw() {
+  openForm(
+    "Change password",
+    [
+      {
+        n: "cur",
+        l: "Current password",
+        t: "password",
+        ph: "Enter your current password",
+      },
+      {
+        n: "pw",
+        l: "New password",
+        t: "password",
+        ph: "At least 6 characters",
+        v: (x) => (x.length < 6 ? "Use at least 6 characters" : ""),
+      },
+      {
+        n: "pw2",
+        l: "Confirm new password",
+        t: "password",
+        ph: "Re-enter the new password",
+        v: (x, d) => (x !== d.pw ? "Passwords do not match" : ""),
+      },
+    ],
+    {},
+    async (d) => {
+      if (!(await api("change_password", { current: d.cur, password: d.pw })))
+        return;
+      toast("Password updated");
+    },
+  );
 }
 function applySet() {
   $$(".brand b").forEach((b) => (b.textContent = db.set.store));
@@ -879,7 +1051,14 @@ function adjust(id) {
   const p = P(id);
   openForm(
     "Update quantity: " + p.name,
-    [{ n: "stock", l: `Counted quantity (${p.unit})`, t: "number" }],
+    [
+      {
+        n: "stock",
+        l: `Counted quantity (${p.unit})`,
+        t: "number",
+        ph: "Enter counted quantity",
+      },
+    ],
     { stock: p.stock },
     async (d) => {
       if (d.stock === p.stock) return toast("Quantity unchanged");
@@ -923,12 +1102,6 @@ function badge() {
   $("#bgc").textContent = n || "";
   $("#bgc").className = n ? "bg" : "";
 }
-$("#pb").onclick = () => {
-  $("#np").classList.add("hide");
-  const p = $("#pm");
-  p.innerHTML = `<div class="it"><b>${e(me.name)}</b><br><small class="mu">${e(me.title)} · ${ROLE[me.role]}</small></div>${ADM() ? '<div class="it" data-v="settings">System settings</div>' : ""}<div class="it" data-a="pw">Change password</div><div class="it" data-a="deactivate">Deactivate my account</div><div class="it" data-a="out">Sign out</div>`;
-  p.classList.toggle("hide");
-};
 document.addEventListener("click", (ev) => {
   if (!ev.target.closest(".rel"))
     $$(".pop").forEach((p) => p.classList.add("hide"));
@@ -952,7 +1125,6 @@ async function initLogin() {
 function startUI(fresh) {
   setRole();
   $("#login").classList.add("hide");
-  $("#un").textContent = me.name;
   buildNav();
   applySet();
   if (fresh) log("Signed in");
@@ -991,23 +1163,43 @@ $("#lf").onsubmit = async (ev) => {
   if (await load()) startUI(true);
 };
 async function deactivateSelf() {
-  ask("Deactivate your own account? You will be signed out and an administrator will need to reactivate your account.", async () => {
-    const result = await api("deactivate_self", {}, false);
-    if (!result) return;
-    toast("Your account has been deactivated.");
-    me = null;
-    Object.assign(db, { cats: [], sup: [], prod: [], mov: [], sales: [], emp: [], logs: [] });
-    document.body.className = "";
-    $$(".pop").forEach((p) => p.classList.add("hide"));
-    $("#login").classList.remove("hide");
-    await initLogin();
-  }, "Deactivate");
+  ask(
+    "Deactivate your own account? You will be signed out and an administrator will need to reactivate your account.",
+    async () => {
+      const result = await api("deactivate_self", {}, false);
+      if (!result) return;
+      toast("Your account has been deactivated.");
+      me = null;
+      Object.assign(db, {
+        cats: [],
+        sup: [],
+        prod: [],
+        mov: [],
+        sales: [],
+        emp: [],
+        logs: [],
+      });
+      document.body.className = "";
+      $$(".pop").forEach((p) => p.classList.add("hide"));
+      $("#login").classList.remove("hide");
+      await initLogin();
+    },
+    "Deactivate",
+  );
 }
 async function signOut() {
   await api("log", { text: "Signed out" }, true);
   await api("logout", {}, true);
   me = null;
-  Object.assign(db, { cats: [], sup: [], prod: [], mov: [], sales: [], emp: [], logs: [] });
+  Object.assign(db, {
+    cats: [],
+    sup: [],
+    prod: [],
+    mov: [],
+    sales: [],
+    emp: [],
+    logs: [],
+  });
   document.body.className = "";
   $$(".pop").forEach((p) => p.classList.add("hide"));
   $("#login").classList.remove("hide");
@@ -1019,7 +1211,9 @@ function show(v) {
   document.body.classList.toggle("home", v == "dashboard");
   const x = V.find((a) => a[0] == v);
   $$(".v").forEach((s) => s.classList.toggle("on", s.id == v));
-  $$("#nav button").forEach((b) => b.classList.toggle("on", b.dataset.v == v));
+  $$("#nav button, #sfn button").forEach((b) =>
+    b.classList.toggle("on", b.dataset.v == v),
+  );
   $("#ttl").textContent = x[1];
   $("#bc").innerHTML =
     `<span>Home</span><span>${GN[GRP[v]]}</span><span>${x[1]}</span>`;
@@ -1058,20 +1252,27 @@ document.addEventListener("click", (ev) => {
     pw: () => toast("Password changes are managed by your administrator"),
     deactivate: deactivateSelf,
     out: signOut,
+    myinfo: editMyInfo,
+    mypw: changeMyPw,
   })[d.a]();
 });
 ["#pq", "#sq"].forEach((s) => ($(s).oninput = () => show(cur)));
-["#pc", "#mf", "#pa", "#ca", "#sa", "#ea"].forEach((s) => ($(s).onchange = () => show(cur)));
+["#pc", "#mf", "#pa", "#ca", "#sa", "#ea"].forEach(
+  (s) => ($(s).onchange = () => show(cur)),
+);
 $("#menu").onclick = () => document.body.classList.toggle("nav-open");
 $("#ov").onclick = () => document.body.classList.remove("nav-open");
 const root = document.documentElement;
 const osDark = matchMedia("(prefers-color-scheme:dark)");
-const isDark = () => (root.dataset.theme || (osDark.matches ? "dark" : "light")) == "dark";
+const isDark = () =>
+  (root.dataset.theme || (osDark.matches ? "dark" : "light")) == "dark";
 function syncThemeUI() {
   const bg = getComputedStyle(root).getPropertyValue("--bg").trim();
   const m = document.querySelector('meta[name="theme-color"]');
   if (m && bg) m.setAttribute("content", bg);
-  ["#th", "#lth"].forEach((s) => $(s) && $(s).setAttribute("aria-pressed", isDark()));
+  ["#th", "#lth"].forEach(
+    (s) => $(s) && $(s).setAttribute("aria-pressed", isDark()),
+  );
 }
 function applyTheme(t, save) {
   root.dataset.theme = t;
@@ -1365,7 +1566,10 @@ function rHome() {
           borderWidth: 3,
           pointRadius: 4,
           pointHoverRadius: 7,
-          pointBackgroundColor: getComputedStyle(document.documentElement).getPropertyValue("--pn").trim() || "#fff",
+          pointBackgroundColor:
+            getComputedStyle(document.documentElement)
+              .getPropertyValue("--pn")
+              .trim() || "#fff",
           pointBorderColor: "#3B82F6",
           pointBorderWidth: 2,
         },
@@ -1443,11 +1647,11 @@ function tlHtml(L) {
               ? ["unarchive", "var(--k-add)"]
               : /deleted/.test(l.a)
                 ? ["delete", "var(--k-del)"]
-            : /added|created/i.test(l.a)
-              ? ["add_circle", "var(--k-add)"]
-              : /Signed/.test(l.a)
-                ? ["login", "var(--k-in)"]
-                : ["edit", "var(--k-edit)"];
+                : /added|created/i.test(l.a)
+                  ? ["add_circle", "var(--k-add)"]
+                  : /Signed/.test(l.a)
+                    ? ["login", "var(--k-in)"]
+                    : ["edit", "var(--k-edit)"];
       const day = l.t.slice(0, 10),
         hd = day != d ? `<div class="tld">${(d = day)}</div>` : "";
       return (
@@ -1466,7 +1670,6 @@ const NM = {
   po: ["local_shipping", "var(--k-add)", "Procurement"],
 };
 $("#bell").onclick = () => {
-  $("#pm").classList.add("hide");
   const p = $("#np"),
     ns = notes().map((n, i) => ({
       ...n,
