@@ -124,7 +124,6 @@ $ARCHIVABLE = [
     "product"  => ["products",   "product_id",  "manage"],
     "category" => ["categories", "category_id", "manage"],
     "supplier" => ["suppliers",  "supplier_id", "manage"],
-    "employee" => ["users",      "user_id",     "users"],
 ];
 if (preg_match('/^(archive|restore)_([a-z]+)$/', $action, $m) && isset($ARCHIVABLE[$m[2]])) {
     $doArchive = $m[1] === "archive";
@@ -143,15 +142,6 @@ if (preg_match('/^(archive|restore)_([a-z]+)$/', $action, $m) && isset($ARCHIVAB
             fail("Archive or move the active products in this category first", 409);
         if ($kind === "supplier" && (int)rows("SELECT COUNT(*) c FROM products WHERE supplier_id = ? AND archived_at IS NULL", "i", [$id])[0]["c"] > 0)
             fail("Archive or move the active products from this supplier first", 409);
-        if ($kind === "employee") {
-            if ($id === $u["id"]) fail("You cannot archive your own account");
-            $e = rows("SELECT role_id, status FROM users WHERE user_id = ?", "i", [$id])[0];
-            if ((int)$e["role_id"] === 1 && $e["status"] === "Active" && other_active_admins($id) < 1)
-                fail("You cannot archive the last active administrator");
-            // archived accounts cannot sign in
-            run("UPDATE users SET archived_at = NOW(), status = 'Inactive' WHERE user_id = ?", "i", [$id]);
-            out(["ok" => true, "archived" => true]);
-        }
         run("UPDATE `$tbl` SET archived_at = NOW() WHERE `$pk` = ?", "i", [$id]);
     } else {
         if ($kind === "product") {
@@ -160,10 +150,6 @@ if (preg_match('/^(archive|restore)_([a-z]+)$/', $action, $m) && isset($ARCHIVAB
                        JOIN suppliers s ON s.supplier_id = p.supplier_id WHERE p.product_id = ?", "i", [$id])[0] ?? null;
             if ($p && $p["ca"] !== null) fail("Restore this product's category first", 409);
             if ($p && $p["sa"] !== null) fail("Restore this product's supplier first", 409);
-        }
-        if ($kind === "employee") {
-            run("UPDATE users SET archived_at = NULL, status = 'Active' WHERE user_id = ?", "i", [$id]);
-            out(["ok" => true, "archived" => false]);
         }
         run("UPDATE `$tbl` SET archived_at = NULL WHERE `$pk` = ?", "i", [$id]);
     }
@@ -280,8 +266,8 @@ case "bootstrap":
     $data["emp"] = [];
     if ($u["role"] === "admin") {
         $data["emp"] = array_map(fn($r) => ["id" => (int)$r["user_id"], "name" => $r["full_name"], "title" => $r["job_title"] ?? "",
-            "role" => $ROLE_KEY[(int)$r["role_id"]], "phone" => $r["phone"] ?: "—", "status" => $r["status"], "arch" => (bool)$r["arch"]],
-            rows("SELECT user_id, full_name, job_title, role_id, phone, status, archived_at IS NOT NULL AS arch FROM users ORDER BY user_id DESC"));
+            "role" => $ROLE_KEY[(int)$r["role_id"]], "phone" => $r["phone"] ?: "—", "status" => $r["status"]],
+            rows("SELECT user_id, full_name, job_title, role_id, phone, status FROM users ORDER BY user_id DESC"));
     }
     $data["logs"] = [];
     if (in_array($u["role"], ["admin", "manager"])) {
@@ -362,28 +348,44 @@ case "save_employee":
     $u = need("users");
     $id = (int)($in["id"] ?? 0);
     $name = $str("name", 100); $title = $str("title", 80); $role = $str("role", 20);
-    $phone = $str("phone", 30); $status = $str("status", 10) ?: "Active";
+    $phone = $str("phone", 30);
     if ($phone === "" || $phone === "—") $phone = null;
     if ($name === "") fail("Full name is required");
     if ($phone !== null && !valid_ph_phone($phone)) fail("Enter a valid Philippine mobile number (09XXXXXXXXX)");
     if (!isset($ROLE_ID[$role])) fail("Invalid role");
-    if (!in_array($status, ["Active", "Inactive"])) fail("Invalid status");
     if ($id) {
         if ($id === $u["id"]) fail("Ask another administrator to edit your own record");
-        $cur = rows("SELECT role_id, archived_at FROM users WHERE user_id = ?", "i", [$id])[0] ?? null;
+        $cur = rows("SELECT role_id FROM users WHERE user_id = ?", "i", [$id])[0] ?? null;
         if (!$cur) fail("Employee not found", 404);
-        if ($cur["archived_at"] !== null) fail("This employee is archived. Restore the account before editing it", 409);
-        if ((int)$cur["role_id"] === 1 && ($role !== "admin" || $status !== "Active") && other_active_admins($id) < 1) {
-            fail("You cannot demote or deactivate the last administrator");
+        if ((int)$cur["role_id"] === 1 && $role !== "admin" && other_active_admins($id) < 1) {
+            fail("You cannot demote the last active administrator");
         }
-        run("UPDATE users SET full_name=?, job_title=?, role_id=?, phone=?, status=? WHERE user_id=?",
-            "ssissi", [$name, $title === "" ? null : $title, $ROLE_ID[$role], $phone, $status, $id]);
+        // status is intentionally not editable here: use set_employee_status
+        run("UPDATE users SET full_name=?, job_title=?, role_id=?, phone=? WHERE user_id=?",
+            "ssisi", [$name, $title === "" ? null : $title, $ROLE_ID[$role], $phone, $id]);
     } else {
         $pw = (string)($in["pw"] ?? "");
         if (strlen($pw) < 6) fail("Use at least 6 characters for the password");
-        make_user($name, $title, $role, $pw, $phone, $status);
+        make_user($name, $title, $role, $pw, $phone, "Active"); // new accounts start Active
     }
     out(["ok" => true]);
+
+/* Employees are never deleted or archived. Their account is switched between
+   Active and Inactive; Inactive accounts cannot sign in, history is preserved. */
+case "set_employee_status":
+    $u = need("users");
+    $id = (int)($in["id"] ?? 0);
+    $status = $str("status", 10);
+    if ($id < 1) fail("Choose a valid employee");
+    if (!in_array($status, ["Active", "Inactive"], true)) fail("Invalid status");
+    if ($id === $u["id"]) fail("You cannot change the status of your own account here");
+    $cur = rows("SELECT role_id, status FROM users WHERE user_id = ?", "i", [$id])[0] ?? null;
+    if (!$cur) fail("Employee not found", 404);
+    if ($cur["status"] === $status) out(["ok" => true, "status" => $status]); // nothing to change
+    if ($status === "Inactive" && (int)$cur["role_id"] === 1 && other_active_admins($id) < 1)
+        fail("You cannot deactivate the last active administrator");
+    run("UPDATE users SET status = ? WHERE user_id = ?", "si", [$status, $id]);
+    out(["ok" => true, "status" => $status]);
 
 /* ====================== STOCK MOVEMENTS ====================== */
 case "add_movement":
