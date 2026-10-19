@@ -35,7 +35,7 @@ CREATE TABLE users (
   phone          VARCHAR(30)      NULL,
   status         ENUM('Active','Inactive') NOT NULL DEFAULT 'Active',
   created_at     TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  archived_at    DATETIME         NULL DEFAULT NULL,  -- NULL = active, timestamp = archived (restorable)
+  -- Employees are never deleted or archived: `status` (Active/Inactive) controls sign-in.
   CONSTRAINT pk_users PRIMARY KEY (user_id),
   CONSTRAINT uq_users_username UNIQUE (username),
   CONSTRAINT uq_users_email    UNIQUE (email),
