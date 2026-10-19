@@ -1,4 +1,4 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -8,16 +8,6 @@
     />
     <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" content="#f2f5fa" />
-    <script>
-      /* Apply the saved theme before first paint so dark mode never flashes light */
-      (function () {
-        try {
-          var t = localStorage.getItem("th");
-          if (t === "dark" || t === "light")
-            document.documentElement.dataset.theme = t;
-        } catch (e) {}
-      })();
-    </script>
     <title>Stock Keeper – Store Management</title>
     <link
       rel="icon"
@@ -37,7 +27,7 @@
       crossorigin="anonymous"
     />
 
-    <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="style.css?v=202610191150" />
   </head>
   <body>
     <aside>
@@ -186,21 +176,18 @@
       </section>
       <section class="v" id="employees">
         <div class="bar">
-          <input id="eq" type="search" placeholder="Search employees" /><select
-            id="ea"
-            class="af"
-            aria-label="Archive filter"
-          >
-            <option value="">Active</option>
-            <option value="arch">Archived</option>
-            <option value="all">Active + archived</option></select
+          <input id="eq" type="search" placeholder="Search employees" /><select id="ea" class="af" aria-label="Status filter">
+            <option value="">All statuses</option>
+            <option value="Active">Active only</option>
+            <option value="Inactive">Inactive only</option></select
           ><button class="b p" data-a="edit" data-s="emp">Add employee</button>
         </div>
         <div class="card tw" id="etbl"></div>
         <p class="mu">
           Administrators have full access. Staff can view products, process
-          sales and manage stock. Inactive and archived accounts cannot sign in.
-          Archived accounts keep their history and can be restored.
+          sales and manage stock. Inactive accounts cannot sign in. Employees are never
+          deleted: switching an account to Inactive keeps its full history and
+          you can reactivate it at any time.
         </p>
       </section>
       <section class="v" id="logs">
@@ -306,6 +293,6 @@
       src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
       crossorigin="anonymous"
     ></script>
-    <script src="app.js"></script>
+    <script src="app.js?v=202610191150"></script>
   </body>
 </html>
