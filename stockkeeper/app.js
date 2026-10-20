@@ -151,12 +151,20 @@ const archTag = (x) => (x.arch ? ' <span class="tg">Archived</span>' : "");
 const archEmpty = (sel, what) =>
   $(sel).value == "arch" ? `No archived ${what}.` : null;
 const acts = (s, id) => {
-  if (!can(s == "emp" ? "users" : "manage")) return "";
+  if (!can("manage")) return "";
   const it = db[S[s].k].find((x) => x.id === id);
   return it && it.arch
     ? `<button class="b s" data-a="restore" data-s="${s}" data-id="${id}">Restore</button>`
     : `<button class="b s" data-a="edit" data-s="${s}" data-id="${id}">Edit</button> <button class="b s" data-a="arch" data-s="${s}" data-id="${id}">Archive</button>`;
 };
+/* Employee actions: Edit plus an Active/Inactive toggle (employees are never deleted or archived). */
+const empActs = (u) =>
+  !can("users")
+    ? ""
+    : `<button class="b s" data-a="edit" data-s="emp" data-id="${u.id}">Edit</button> ` +
+      (u.status == "Active"
+        ? `<button class="b s" data-a="empst" data-id="${u.id}" data-to="Inactive">Deactivate</button>`
+        : `<button class="b s" data-a="empst" data-id="${u.id}" data-to="Active">Activate</button>`);
 const dlg = $("#dlg");
 dlg.addEventListener("click", (ev) => {
   if (ev.target.closest("[data-x]")) dlg.close();
@@ -329,7 +337,7 @@ function edit(s, id) {
 }
 /* Archive instead of delete: the record stays in the database and can be restored. */
 function archive(s, id) {
-  if (!can(s == "emp" ? "users" : "manage")) return deny();
+  if (!can("manage")) return deny();
   const c = S[s],
     it = db[c.k].find((x) => x.id === id);
   const why =
@@ -337,23 +345,12 @@ function archive(s, id) {
       ? "Archive or move the active products in this category first"
       : s == "sup" && actv("prod").some((p) => p.sup === id)
         ? "Archive or move the active products from this supplier first"
-        : s == "emp" && id === me.id
-          ? "You cannot archive your own account"
-          : s == "emp" &&
-              it.role == "admin" &&
-              it.status == "Active" &&
-              db.emp.filter(
-                (u) => u.role == "admin" && u.status == "Active" && !u.arch,
-              ).length < 2
-            ? "You cannot archive the last active administrator"
-            : "";
+        : "";
   if (why) return toast(why, "bad");
   const note =
-    s == "emp"
-      ? "The account will be deactivated and cannot sign in until restored."
-      : s == "prod"
-        ? "It will be hidden from sales, stock forms and reports."
-        : "It will be hidden from lists and forms.";
+    s == "prod"
+      ? "It will be hidden from sales, stock forms and reports."
+      : "It will be hidden from lists and forms.";
   ask(
     `Archive <b>${e(it.name)}</b>? ${note} Nothing is deleted. You can restore it any time by switching the filter to Archived.`,
     async () => {
@@ -365,8 +362,39 @@ function archive(s, id) {
     "Archive",
   );
 }
+/* Switch an employee between Active and Inactive. Inactive accounts cannot sign in; records are kept. */
+function setEmpStatus(id, status) {
+  if (!can("users")) return deny();
+  const it = db.emp.find((x) => x.id === id);
+  if (!it) return;
+  if (id === me.id)
+    return toast(
+      "You cannot change the status of your own account here",
+      "bad",
+    );
+  if (
+    status == "Inactive" &&
+    it.role == "admin" &&
+    db.emp.filter((u) => u.role == "admin" && u.status == "Active").length < 2
+  )
+    return toast("You cannot deactivate the last active administrator", "bad");
+  const go = async () => {
+    if (!(await api("set_employee_status", { id, status }))) return;
+    await load();
+    show(cur);
+    toast(
+      `Employee ${status == "Active" ? "activated" : "deactivated"}: ${it.name}`,
+    );
+  };
+  if (status == "Active") return go();
+  ask(
+    `Deactivate <b>${e(it.name)}</b>? They will no longer be able to sign in. Their records and history are kept, and you can activate the account again at any time.`,
+    go,
+    "Deactivate",
+  );
+}
 async function restore(s, id) {
-  if (!can(s == "emp" ? "users" : "manage")) return deny();
+  if (!can("manage")) return deny();
   const c = S[s],
     it = db[c.k].find((x) => x.id === id);
   if (!(await api("restore_" + API[s], { id }))) return;
@@ -709,7 +737,7 @@ function newSale() {
 }
 function saleInfo(id) {
   const s = db.sales.find((x) => x.id == id);
-  dlg.innerHTML = `<h3>Receipt ${s.id}</h3><p class="mu" data-st="margin:0 0 12px">${s.date} · ${e(s.cust)} · ${e(s.pay)}</p><div class="tw"><table><thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Subtotal</th></tr></thead><tbody>${s.items.map((i) => `<tr><td>${e(P(i.pid).name || "—")}</td><td class="m">${i.qty}</td><td class="m">${money(i.price)}</td><td class="m">${money(i.qty * i.price)}</td></tr>`).join("")}</tbody></table></div><h3 data-st="margin-top:14px">Total ${money(total(s))}</h3><p class="mu" data-st="margin:4px 0 0">Includes ${db.set.tax}% VAT: ${money((total(s) * db.set.tax) / (100 + db.set.tax))} · Cashier: ${e(s.by || "—")}</p><div class="ft"><button class="b p" data-x>Close</button></div>`;
+  dlg.innerHTML = `<h3>Receipt ${s.id}</h3><p class="mu" data-st="margin:0 0 12px">${s.date} · ${e(s.cust)} · ${e(s.pay)}</p><div class="tw"><table><thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Subtotal</th></tr></thead><tbody>${s.items.map((i) => `<tr><td>${e(P(i.pid).name || "—")}</td><td class="m">${i.qty}</td><td class="m">${money(i.price)}</td><td class="m">${money(i.qty * i.price)}</td></tr>`).join("")}</tbody></table></div><h3 data-st="margin-top:14px">Total ${money(total(s))}</h3><p class="mu" data-st="margin:4px 0 0">Includes ${db.set.tax}% VAT: ${money((total(s) * db.set.tax) / (100 + db.set.tax))} · Cashier: ${e(s.by || "—")}</p><div class="ft"><button class="b" data-a="exp" data-t="receipt ${s.id}">Print receipt</button><button class="b p" data-x>Close</button></div>`;
   dlg.showModal();
 }
 
@@ -782,15 +810,6 @@ S.emp = {
       o: Object.entries(ROLE),
     },
     { n: "phone", l: "Phone", t: "tel", ph: "09XXXXXXXXX" },
-    {
-      n: "status",
-      l: "Status",
-      t: "select",
-      o: [
-        ["Active", "Active"],
-        ["Inactive", "Inactive"],
-      ],
-    },
   ],
 };
 function log(a) {
@@ -930,17 +949,17 @@ function rEmp() {
       [
         "Status",
         (u) =>
-          u.arch
-            ? '<span class="tg">Archived</span>'
-            : `<span class="tg ${u.status == "Active" ? "ok" : "bd"}">${u.status}</span>`,
+          `<span class="tg ${u.status == "Active" ? "ok" : "bd"}">${u.status}</span>`,
       ],
-      ["", (u) => acts("emp", u.id), "act"],
+      ["", (u) => empActs(u), "act"],
     ],
     db.emp.filter(
-      (u) => arf("#ea")(u) && (u.name + u.title).toLowerCase().includes(q),
+      (u) =>
+        (!$("#ea").value || u.status == $("#ea").value) &&
+        (u.name + u.title).toLowerCase().includes(q),
     ),
-    archEmpty("#ea", "employees") || "No employees match your search.",
-    archRow,
+    "No employees match your filter.",
+    (u) => (u.status == "Inactive" ? "arch" : ""),
   );
 }
 function rLogs() {
@@ -1236,11 +1255,13 @@ document.addEventListener("click", (ev) => {
     edit: () => edit(d.s, +d.id || 0),
     arch: () => archive(d.s, +d.id),
     restore: () => restore(d.s, +d.id),
+    empst: () => setEmpStatus(+d.id, d.to),
     mv: () => (can("stock") ? mvForm(d.t) : deny()),
     newsale: () => (can("sell") ? newSale() : deny()),
     signup: signUp,
     po: () => toast("Purchase orders are not enabled for this store yet"),
     sale: () => saleInfo(d.id),
+    exp: () => toast("Preparing " + d.t + " export"),
     adj: () => (can("stock") ? adjust(+d.id) : deny()),
     set: () => (ADM() ? setForm() : deny()),
     read: () => {
@@ -1640,17 +1661,21 @@ function tlHtml(L) {
         ? ["receipt_long", "var(--k-sale)"]
         : /^Stock|^Quantity/.test(l.a)
           ? ["swap_vert", "var(--k-stock)"]
-          : /archived/.test(l.a)
-            ? ["inventory_2", "var(--k-stock)"]
-            : /restored/.test(l.a)
-              ? ["unarchive", "var(--k-add)"]
-              : /deleted/.test(l.a)
-                ? ["delete", "var(--k-del)"]
-                : /added|created/i.test(l.a)
-                  ? ["add_circle", "var(--k-add)"]
-                  : /Signed/.test(l.a)
-                    ? ["login", "var(--k-in)"]
-                    : ["edit", "var(--k-edit)"];
+          : /deactivated/i.test(l.a)
+            ? ["person_off", "var(--k-del)"]
+            : /activated/i.test(l.a)
+              ? ["person_check", "var(--k-add)"]
+              : /archived/.test(l.a)
+                ? ["inventory_2", "var(--k-stock)"]
+                : /restored/.test(l.a)
+                  ? ["unarchive", "var(--k-add)"]
+                  : /deleted/.test(l.a)
+                    ? ["delete", "var(--k-del)"]
+                    : /added|created/i.test(l.a)
+                      ? ["add_circle", "var(--k-add)"]
+                      : /Signed/.test(l.a)
+                        ? ["login", "var(--k-in)"]
+                        : ["edit", "var(--k-edit)"];
       const day = l.t.slice(0, 10),
         hd = day != d ? `<div class="tld">${(d = day)}</div>` : "";
       return (
