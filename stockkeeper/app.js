@@ -212,14 +212,23 @@ function openForm(title, fs, vals, save) {
     return d;
   };
   const lab = (f) => fm.elements[f.n].closest("label");
+  /* A field becomes "touched" the first time the user types in it or leaves it.
+     Touched fields are re-validated on every keystroke / change and stay red
+     until they satisfy their rules. Untouched fields are only flagged on submit. */
+  const touched = new Set();
   /* returns true when the field is INVALID, and paints/clears the red state */
   const check = (f, d) => {
-    const x = d[f.n],
-      empty = x === "" || Number.isNaN(x);
+    const el = fm.elements[f.n],
+      x = d[f.n],
+      empty = x === "" || Number.isNaN(x),
+      bad = f.t == "number" && el.validity.badInput; /* e.g. "abc" typed into a number box */
     let m = "";
-    if (empty && !f.opt) m = "This field is required";
+    if (bad) m = "Enter a valid number";
+    else if (empty && !f.opt) m = "This field is required";
     else if (!empty && f.t == "number" && x < (f.min ?? 0))
       m = "Enter at least " + (f.min ?? 0);
+    else if (!empty && f.t == "number" && !f.step && !Number.isInteger(x))
+      m = "Enter a whole number";
     else if (!empty && f.t == "email" && !EMAIL_RE.test(x))
       m = "Enter a valid email address (e.g. name@example.com)";
     else if (!empty && f.t == "tel" && !PH_RE.test(x))
@@ -227,25 +236,48 @@ function openForm(title, fs, vals, save) {
     else if (!empty && f.v) m = f.v(x, d) || "";
     lab(f).classList.toggle("e", !!m);
     lab(f).querySelector(".er").textContent = m;
+    if (m) el.setAttribute("aria-invalid", "true");
+    else el.removeAttribute("aria-invalid");
     return !!m;
   };
-  /* leaving a filled field validates it; flagged fields stay red until they are valid */
-  fm.addEventListener("focusout", (ev) => {
-    const f = fs.find((x) => x.n == ev.target.name);
-    if (f && ev.target.value.trim() !== "") check(f, read());
-  });
-  fm.addEventListener("input", () => {
+  const fieldOf = (ev) => fs.find((x) => x.n == ev.target.name);
+  /* re-check every touched field, so dependent rules update too
+     (e.g. picking another product re-checks the quantity; editing the password re-checks its confirmation) */
+  const revalidate = () => {
     const d = read();
-    fs.forEach((f) => lab(f).classList.contains("e") && check(f, d));
+    fs.forEach((f) => touched.has(f.n) && check(f, d));
+  };
+  let cancelling = false; /* don't let a blur-triggered error shift the Cancel button out from under the click */
+  fm.addEventListener("pointerdown", (ev) => {
+    cancelling = !!ev.target.closest("[data-x]");
+  });
+  const onEdit = (ev) => {
+    const f = fieldOf(ev);
+    if (!f || f.ro) return;
+    touched.add(f.n);
+    revalidate();
+  };
+  fm.addEventListener("input", onEdit);
+  fm.addEventListener("change", onEdit);
+  fm.addEventListener("focusout", (ev) => {
+    const f = fieldOf(ev);
+    if (!f || f.ro || cancelling) return;
+    touched.add(f.n);
+    revalidate();
   });
   fm.onsubmit = (ev) => {
     ev.preventDefault();
     const d = read();
-    let bad = 0;
+    let first = null;
     fs.forEach((f) => {
-      if (check(f, d)) bad++;
+      touched.add(f.n);
+      if (check(f, d) && !first) first = f;
     });
-    if (bad) return toast("Fix the highlighted fields", "bad");
+    if (first) {
+      const el = fm.elements[first.n];
+      if (!el.readOnly) el.focus();
+      return toast("Fix the highlighted fields", "bad");
+    }
     dlg.close();
     save(d);
   };
@@ -1301,11 +1333,51 @@ document.addEventListener("click", (ev) => {
     $$(".pop").forEach((p) => p.classList.add("hide"));
 });
 ["#eq", "#lq"].forEach((s) => ($(s).oninput = () => show(cur)));
+/* ---- login form: real-time validation (same behaviour as openForm) ---- */
+const LOGIN_MSG = {
+  lu: "Enter your username or email",
+  lp: "Enter your password",
+};
+const loginTouched = new Set();
+function paintLogin(input, msg) {
+  const lb = input.closest("label");
+  lb.classList.toggle("e", !!msg);
+  lb.querySelector(".er").textContent = msg;
+  if (msg) input.setAttribute("aria-invalid", "true");
+  else input.removeAttribute("aria-invalid");
+  return !!msg;
+}
+/* returns true when INVALID */
+function checkLogin(input) {
+  const empty = input.id == "lp" ? input.value === "" : input.value.trim() === "";
+  return paintLogin(input, empty ? LOGIN_MSG[input.id] : "");
+}
+let loginPointer = false; /* a click on a button must not be displaced by a blur-triggered error */
+$("#lf").addEventListener("pointerdown", (ev) => {
+  loginPointer = !!ev.target.closest("button:not(.pwt)");
+});
+$("#lf").addEventListener("input", (ev) => {
+  if (!LOGIN_MSG[ev.target.id]) return;
+  loginTouched.add(ev.target.id);
+  delete ev.target.closest("label").dataset.srv;
+  checkLogin(ev.target); /* also replaces any "incorrect password" message once the user edits */
+});
+$("#lf").addEventListener("focusout", (ev) => {
+  if (!LOGIN_MSG[ev.target.id] || loginPointer) return;
+  loginTouched.add(ev.target.id);
+  /* keep the server's "incorrect password" message while the box is empty after a failed attempt */
+  if (ev.target.closest("label").dataset.srv) return;
+  checkLogin(ev.target);
+});
 /* LOGIN PASSWORD CHECKED AGAINST THE HASH*/
 function buildLogin() {
   $("#lu").value = "";
   $("#lp").value = "";
-  $("#lf .er").textContent = "";
+  loginTouched.clear();
+  ["#lu", "#lp"].forEach((id) => {
+    paintLogin($(id), "");
+    delete $(id).closest("label").dataset.srv;
+  });
   setPwVisible($("#lp"), false);
 }
 async function initLogin() {
@@ -1326,20 +1398,18 @@ function startUI(fresh) {
 }
 $("#lf").onsubmit = async (ev) => {
   ev.preventDefault();
-  const er = $("#lf .er"),
+  const lb = $("#lp").closest("label"),
+    er = lb.querySelector(".er"),
     user = $("#lu").value.trim(),
     pw = $("#lp").value;
-  if (!user) {
-    er.textContent = "Enter your username or email";
-    $("#lu").focus();
+  delete lb.dataset.srv;
+  const badU = checkLogin($("#lu")),
+    badP = checkLogin($("#lp"));
+  loginTouched.add("lu").add("lp");
+  if (badU || badP) {
+    (badU ? $("#lu") : $("#lp")).focus();
     return;
   }
-  if (!pw) {
-    er.textContent = "Enter your password";
-    $("#lp").focus();
-    return;
-  }
-  er.textContent = "";
   const j = await api("login", { username: user, password: pw }, true);
   if (!j) {
     const st = (api.last || {}).status;
@@ -1349,6 +1419,9 @@ $("#lf").onsubmit = async (ev) => {
         : st == 0
           ? "Cannot reach the server. Is Apache/MySQL running?"
           : (api.last || {}).error || "Sign in failed. Try again.";
+    lb.classList.add("e"); /* stays red until the user edits the password */
+    lb.dataset.srv = "1";
+    $("#lp").setAttribute("aria-invalid", "true");
     $("#lp").value = "";
     setPwVisible($("#lp"), false);
     $("#lp").focus();
