@@ -153,6 +153,10 @@ const arf = (sel) => {
   return (x) => v == "all" || (v == "arch" ? !!x.arch : !x.arch);
 };
 const archRow = (x) => (x.arch ? "arch" : "");
+/* Added / updated (and archived) dates shown on every record list */
+const dts = (x) =>
+  `<div class="mu2">Added ${e(x.cr || "—")}</div><div class="mu2">Updated ${e(x.up || "—")}</div>` +
+  (x.ar ? `<div class="mu2">Archived ${e(x.ar)}</div>` : "");
 const archTag = (x) => (x.arch ? ' <span class="tg">Archived</span>' : "");
 const archEmpty = (sel, what) =>
   $(sel).value == "arch" ? `No archived ${what}.` : null;
@@ -614,6 +618,7 @@ function rProd() {
       ["Price", (p) => money(p.price), "m"],
       ["Stock level", (p) => stk(p)],
       ["Status", (p) => bdg(p)],
+      ["Added / updated", dts],
       ["", (p) => prodActs(p.id), "act"],
     ],
     rows,
@@ -632,6 +637,7 @@ function rCat() {
         (c) => actv("prod").filter((p) => p.cat === c.id).length,
         "m",
       ],
+      ["Added / updated", dts],
       ["", (c) => acts("cat", c.id), "act"],
     ],
     db.cats.filter(arf("#ca")),
@@ -659,6 +665,7 @@ function rSup() {
         (s) => actv("prod").filter((p) => p.sup === s.id).length,
         "m",
       ],
+      ["Added / updated", dts],
       [
         "",
         (s) =>
@@ -775,7 +782,7 @@ function rSales() {
 function rRep() {
   const rows = actv("prod")
     .slice()
-    .sort((a, b) => a.sku.localeCompare(b.sku));
+    .sort((a, b) => b.id - a.id); /* newest first */
   tbl(
     "#rinv",
     [
@@ -879,7 +886,7 @@ function mvForm(type) {
 
 /* ============ SALES ============ */
 function newSale() {
-  if (!db.cust.length)
+  if (!actv("cust").length)
     return toast(
       "Add a customer first (Customers page). Every sale needs a customer.",
       "bad",
@@ -893,7 +900,7 @@ function newSale() {
         t: "select",
         num: 1,
         ph: "Select a customer",
-        o: db.cust.map((c) => [c.id, `${c.name} – ${c.city}`]),
+        o: actv("cust").map((c) => [c.id, `${c.name} – ${c.city}`]),
       },
       {
         n: "pid",
@@ -1182,6 +1189,7 @@ function rEmp() {
         (u) =>
           `<span class="tg ${u.status == "Active" ? "ok" : "bd"}">${u.status}</span>`,
       ],
+      ["Added / updated", dts],
       ["", (u) => empActs(u), "act"],
     ],
     db.emp.filter(

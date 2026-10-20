@@ -20,7 +20,7 @@ function fail($msg, $code = 400) {
 }
 set_exception_handler(function ($ex) {
     if ($ex instanceof mysqli_sql_exception) {
-        if ($ex->getCode() == 1451) fail("Cannot delete: this record is still used by other data", 409);
+        if ($ex->getCode() == 1451) fail("Records are never deleted. Archive it instead", 409);
         if ($ex->getCode() == 1062) fail("That value already exists (duplicate SKU, name or email)", 409);
         if (in_array($ex->getCode(), [3819, 4025])) fail("A value was rejected by the database rules", 422);
     }
@@ -45,6 +45,10 @@ function run($sql, $types = "", $args = []) {
     return $st;
 }
 
+/* created / updated / archived dates sent with every record list (system rule: track dates) */
+const DT  = "DATE_FORMAT(created_at, '%Y-%m-%d %H:%i') cr, DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i') up";
+const DTA = DT . ", DATE_FORMAT(archived_at, '%Y-%m-%d %H:%i') ar";
+
 /* ---------- roles and permissions (same matrix as app.js) ---------- */
 $ROLE_KEY = [1 => "admin", 2 => "manager", 3 => "inventory", 4 => "cashier"];
 $ROLE_ID  = array_flip($ROLE_KEY);
@@ -53,6 +57,7 @@ $CAN = [
     "users"  => ["admin"],
     "stock"  => ["admin", "inventory"],
     "sell"   => ["admin", "cashier"],
+    "customers" => ["admin", "manager", "cashier"],
 ];
 
 function current_user() {
@@ -124,6 +129,7 @@ $ARCHIVABLE = [
     "product"  => ["products",   "product_id",  "manage"],
     "category" => ["categories", "category_id", "manage"],
     "supplier" => ["suppliers",  "supplier_id", "manage"],
+    "customer" => ["customers",  "customer_id", "manage"],
 ];
 if (preg_match('/^(archive|restore)_([a-z]+)$/', $action, $m) && isset($ARCHIVABLE[$m[2]])) {
     $doArchive = $m[1] === "archive";
@@ -228,17 +234,17 @@ case "bootstrap":
     $data = [];
 
     // "arch" = true when the record is archived (hidden by default, restorable)
-    $data["cats"] = array_map(fn($r) => ["id" => (int)$r["category_id"], "name" => $r["category_name"], "desc" => $r["description"] ?? "", "arch" => (bool)$r["arch"]],
-        rows("SELECT category_id, category_name, description, archived_at IS NOT NULL AS arch FROM categories ORDER BY category_id DESC"));
+    $data["cats"] = array_map(fn($r) => ["id" => (int)$r["category_id"], "name" => $r["category_name"], "desc" => $r["description"] ?? "", "arch" => (bool)$r["arch"], "cr" => $r["cr"], "up" => $r["up"], "ar" => $r["ar"]],
+        rows("SELECT category_id, category_name, description, archived_at IS NOT NULL AS arch, " . DTA . " FROM categories ORDER BY category_id DESC"));
 
     $data["sup"] = array_map(fn($r) => ["id" => (int)$r["supplier_id"], "name" => $r["company_name"], "contact" => $r["contact_person"],
-        "phone" => $r["phone"], "email" => $r["email"] ?? "", "city" => $r["address"], "arch" => (bool)$r["arch"]],
-        rows("SELECT supplier_id, company_name, contact_person, phone, email, address, archived_at IS NOT NULL AS arch FROM suppliers ORDER BY supplier_id DESC"));
+        "phone" => $r["phone"], "email" => $r["email"] ?? "", "city" => $r["address"], "arch" => (bool)$r["arch"], "cr" => $r["cr"], "up" => $r["up"], "ar" => $r["ar"]],
+        rows("SELECT supplier_id, company_name, contact_person, phone, email, address, archived_at IS NOT NULL AS arch, " . DTA . " FROM suppliers ORDER BY supplier_id DESC"));
 
     $data["prod"] = array_map(fn($r) => ["id" => (int)$r["product_id"], "sku" => $r["sku"], "name" => $r["product_name"],
         "cat" => (int)$r["category_id"], "sup" => (int)$r["supplier_id"], "price" => (float)$r["unit_price"],
-        "stock" => (int)$r["stock_quantity"], "min" => (int)$r["reorder_level"], "unit" => $r["unit"], "arch" => (bool)$r["arch"]],
-        rows("SELECT product_id, sku, product_name, category_id, supplier_id, unit_price, stock_quantity, reorder_level, unit, archived_at IS NOT NULL AS arch
+        "stock" => (int)$r["stock_quantity"], "min" => (int)$r["reorder_level"], "unit" => $r["unit"], "arch" => (bool)$r["arch"], "cr" => $r["cr"], "up" => $r["up"], "ar" => $r["ar"]],
+        rows("SELECT product_id, sku, product_name, category_id, supplier_id, unit_price, stock_quantity, reorder_level, unit, archived_at IS NOT NULL AS arch, " . DTA . "
               FROM products ORDER BY product_id DESC"));
 
     $data["mov"] = array_map(fn($r) => ["id" => (int)$r["movement_id"], "date" => $r["d"], "pid" => (int)$r["product_id"],
@@ -248,13 +254,18 @@ case "bootstrap":
               FROM inventory_movements m JOIN users u ON u.user_id = m.user_id
               ORDER BY m.movement_date, m.movement_id"));
 
+    $data["cust"] = array_map(fn($r) => ["id" => (int)$r["customer_id"], "name" => $r["customer_name"], "phone" => $r["phone"],
+        "street" => $r["street"] ?? "", "brgy" => $r["barangay"], "city" => $r["city"], "prov" => $r["province"],
+        "arch" => (bool)$r["arch"], "cr" => $r["cr"], "up" => $r["up"], "ar" => $r["ar"]],
+        rows("SELECT customer_id, customer_name, phone, street, barangay, city, province, archived_at IS NOT NULL AS arch, " . DTA . " FROM customers ORDER BY customer_id DESC"));
+
     $items = [];
     foreach (rows("SELECT sale_id, product_id, quantity, unit_price FROM sale_items ORDER BY sale_item_id") as $r) {
         $items[(int)$r["sale_id"]][] = ["pid" => (int)$r["product_id"], "qty" => (int)$r["quantity"], "price" => (float)$r["unit_price"]];
     }
-    $data["sales"] = array_map(fn($r) => ["id" => $r["receipt_number"], "date" => $r["d"], "cust" => $r["customer_name"],
+    $data["sales"] = array_map(fn($r) => ["id" => $r["receipt_number"], "date" => $r["d"], "cid" => $r["customer_id"] === null ? null : (int)$r["customer_id"], "cust" => $r["customer_name"],
         "pay" => $r["payment_method"], "by" => $r["full_name"], "items" => $items[(int)$r["sale_id"]] ?? []],
-        rows("SELECT s.sale_id, s.receipt_number, DATE_FORMAT(s.sale_date, '%Y-%m-%d %H:%i') d, s.customer_name, s.payment_method, u.full_name
+        rows("SELECT s.sale_id, s.receipt_number, DATE_FORMAT(s.sale_date, '%Y-%m-%d %H:%i') d, s.customer_id, s.customer_name, s.payment_method, u.full_name
               FROM sales s JOIN users u ON u.user_id = s.user_id
               ORDER BY s.sale_date, s.sale_id"));
 
@@ -266,8 +277,8 @@ case "bootstrap":
     $data["emp"] = [];
     if ($u["role"] === "admin") {
         $data["emp"] = array_map(fn($r) => ["id" => (int)$r["user_id"], "name" => $r["full_name"], "title" => $r["job_title"] ?? "",
-            "role" => $ROLE_KEY[(int)$r["role_id"]], "phone" => $r["phone"] ?: "—", "status" => $r["status"]],
-            rows("SELECT user_id, full_name, job_title, role_id, phone, status FROM users ORDER BY user_id DESC"));
+            "role" => $ROLE_KEY[(int)$r["role_id"]], "phone" => $r["phone"] ?: "—", "status" => $r["status"], "cr" => $r["cr"], "up" => $r["up"]],
+            rows("SELECT user_id, full_name, job_title, role_id, phone, status, " . DT . " FROM users ORDER BY user_id DESC"));
     }
     $data["logs"] = [];
     if (in_array($u["role"], ["admin", "manager"])) {
@@ -341,6 +352,25 @@ case "save_supplier":
                  "sssssi", [$name, $contact, $phone, $email, $city, $id]);
     else     run("INSERT INTO suppliers (company_name, contact_person, phone, email, address) VALUES (?, ?, ?, ?, ?)",
                  "sssss", [$name, $contact, $phone, $email, $city]);
+    out(["ok" => true]);
+
+/* ====================== CUSTOMERS ====================== */
+case "save_customer":
+    need("customers");
+    $id = (int)($in["id"] ?? 0);
+    $name = $str("name", 120); $phone = $str("phone", 30);
+    $street = $str("street", 150); $brgy = $str("brgy", 80); $city = $str("city", 80); $prov = $str("prov", 80);
+    $street = $street === "" ? null : $street;
+    if ($name === "" || $phone === "" || $brgy === "" || $city === "" || $prov === "") fail("Name, mobile number, barangay, city and province are required");
+    if (!valid_ph_phone($phone)) fail("Enter a valid Philippine mobile number (09XXXXXXXXX)");
+    if ($id) {
+        if (!rows("SELECT 1 FROM customers WHERE customer_id = ?", "i", [$id])) fail("Customer not found", 404);
+        run("UPDATE customers SET customer_name=?, phone=?, street=?, barangay=?, city=?, province=? WHERE customer_id=?",
+            "ssssssi", [$name, $phone, $street, $brgy, $city, $prov, $id]);
+    } else {
+        run("INSERT INTO customers (customer_name, phone, street, barangay, city, province) VALUES (?, ?, ?, ?, ?, ?)",
+            "ssssss", [$name, $phone, $street, $brgy, $city, $prov]);
+    }
     out(["ok" => true]);
 
 /* ====================== EMPLOYEES (administrator only) ====================== */
@@ -428,7 +458,14 @@ case "adjust_stock":
 /* ====================== SALES ====================== */
 case "add_sale":
     $u = need("sell");
-    $cust = $str("cust", 120) ?: "Walk-in";
+    $cid = (int)($in["cid"] ?? 0);
+    $cust = "Walk-in";
+    if ($cid) {
+        $c = rows("SELECT customer_name, archived_at FROM customers WHERE customer_id = ?", "i", [$cid])[0] ?? null;
+        if (!$c) fail("Customer not found", 404);
+        if ($c["archived_at"] !== null) fail("This customer is archived. Restore it first", 409);
+        $cust = $c["customer_name"]; // saved on the receipt as a historical snapshot
+    }
     $pid = (int)($in["pid"] ?? 0);
     $qty = (int)($in["qty"] ?? 0);
     $pay = $str("pay", 20);
@@ -441,8 +478,8 @@ case "add_sale":
     if ($qty > (int)$p["stock_quantity"]) fail("Only " . $p["stock_quantity"] . " in stock", 422);
     $n = (int)rows("SELECT COALESCE(MAX(CAST(SUBSTRING(receipt_number, 3) AS UNSIGNED)), 1000) + 1 AS n FROM sales")[0]["n"];
     $receipt = "S-" . $n;
-    run("INSERT INTO sales (receipt_number, user_id, customer_name, payment_method, total_amount) VALUES (?, ?, ?, ?, 0)",
-        "siss", [$receipt, $u["id"], $cust, $pay]);
+    run("INSERT INTO sales (receipt_number, user_id, customer_id, customer_name, payment_method, total_amount) VALUES (?, ?, ?, ?, ?, 0)",
+        "siiss", [$receipt, $u["id"], $cid ?: null, $cust, $pay]);
     $saleId = $conn->insert_id;
     run("INSERT INTO sale_items (sale_id, product_id, quantity, unit_price) VALUES (?, ?, ?, ?)",
         "iiid", [$saleId, $pid, $qty, $p["unit_price"]]);

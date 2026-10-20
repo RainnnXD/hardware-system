@@ -7,12 +7,36 @@
 -- database or after taking a backup. PLEASE BASAHIN NG MAAYOS.
 -- LOG#1 (FIXED NA PO): ERROR ENCOUNTERED, Table 'stockkeeper_db.settings' doesn't exist, but will be created by this script. FIX PLEASE.
 -- =============================================================================
+-- GENERAL SYSTEM RULE: every editable record tracks WHEN it was created and WHEN it was last updated.
+--   created_at = set once by the database on INSERT.
+--   updated_at = refreshed by the database on every UPDATE (edit, archive, restore, stock change).
+--   Both are filled by MySQL itself, so no application code can forget to set them.
+--   Ledger tables (inventory_movements, sales, sale_items, activity_logs) are never edited: their own
+--   movement_date / sale_date / date_created column is the creation date.
+--   Any NEW editable table (e.g. customers) must include created_at and updated_at the same way.
+-- GENERAL SYSTEM RULE: records are archived, never permanently deleted.
+--   Archivable records (products, categories, suppliers, customers) carry archived_at: NULL = active, a date = archived.
+--   Restoring sets archived_at back to NULL. Employees are switched Active/Inactive instead.
+--   Sales, sale items and stock movements are permanent history and cannot be removed.
+--   As a safety net the database itself refuses DELETE on these tables (see the triggers after the tables).
+-- ALREADY HAVE DATA? Do not re-run this file. Instead run, once, per table:
+--   ALTER TABLE categories ADD created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+--     ADD updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
+--   (same for suppliers, products and settings; for users only: ADD updated_at TIMESTAMP NOT NULL
+--    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;)
+--   For the customers feature on an existing database, run the CREATE TABLE customers block and the
+--   trg_no_delete_customers trigger below, then:
+--     ALTER TABLE sales ADD COLUMN customer_id INT UNSIGNED NULL AFTER user_id,
+--       ADD KEY idx_sales_customer (customer_id),
+--       ADD CONSTRAINT fk_sales_customer FOREIGN KEY (customer_id) REFERENCES customers (customer_id)
+--         ON UPDATE CASCADE ON DELETE RESTRICT;
+-- =============================================================================
 CREATE DATABASE IF NOT EXISTS stockkeeper_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE stockkeeper_db;
 
 SET FOREIGN_KEY_CHECKS = 0;
 DROP TABLE IF EXISTS settings, activity_logs, sale_items, sales, inventory_movements,
-                     products, suppliers, categories, users, roles;
+                     products, customers, suppliers, categories, users, roles;
 SET FOREIGN_KEY_CHECKS = 1;
 
 -- ROLES
@@ -34,7 +58,8 @@ CREATE TABLE users (
   job_title      VARCHAR(80)      NULL,
   phone          VARCHAR(30)      NULL,
   status         ENUM('Active','Inactive') NOT NULL DEFAULT 'Active',
-  created_at     TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at     TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP,  -- set once when the account is created
+  updated_at     TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,  -- refreshed on every change
   -- Employees are never deleted or archived: `status` (Active/Inactive) controls sign-in.
   CONSTRAINT pk_users PRIMARY KEY (user_id),
   CONSTRAINT uq_users_username UNIQUE (username),
@@ -52,6 +77,8 @@ CREATE TABLE categories (
   category_name  VARCHAR(60)       NOT NULL,
   description    VARCHAR(255)      NULL,
   archived_at    DATETIME         NULL DEFAULT NULL,  -- NULL = active, timestamp = archived (restorable)
+  created_at     DATETIME          NOT NULL DEFAULT CURRENT_TIMESTAMP,  -- set once when the record is created
+  updated_at     DATETIME          NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,  -- refreshed automatically on every change
   CONSTRAINT pk_categories PRIMARY KEY (category_id),
   CONSTRAINT uq_categories_name UNIQUE (category_name)
 ) ENGINE=InnoDB;
@@ -65,6 +92,8 @@ CREATE TABLE suppliers (
   email           VARCHAR(120)      NULL,
   address         VARCHAR(255)      NOT NULL,
   archived_at    DATETIME         NULL DEFAULT NULL,  -- NULL = active, timestamp = archived (restorable)
+  created_at     DATETIME          NOT NULL DEFAULT CURRENT_TIMESTAMP,  -- set once when the record is created
+  updated_at     DATETIME          NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,  -- refreshed automatically on every change
   CONSTRAINT pk_suppliers PRIMARY KEY (supplier_id),
   CONSTRAINT uq_suppliers_company UNIQUE (company_name)
 ) ENGINE=InnoDB;
@@ -81,6 +110,8 @@ CREATE TABLE products (
   reorder_level   INT               NOT NULL DEFAULT 10,
   unit            VARCHAR(20)       NOT NULL DEFAULT 'pcs',
   archived_at    DATETIME         NULL DEFAULT NULL,  -- NULL = active, timestamp = archived (restorable)
+  created_at     DATETIME          NOT NULL DEFAULT CURRENT_TIMESTAMP,  -- set once when the record is created
+  updated_at     DATETIME          NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,  -- refreshed automatically on every change
   CONSTRAINT pk_products PRIMARY KEY (product_id),
   CONSTRAINT uq_products_sku UNIQUE (sku),
   CONSTRAINT fk_products_category FOREIGN KEY (category_id) REFERENCES categories (category_id)
@@ -116,12 +147,30 @@ CREATE TABLE inventory_movements (
   KEY idx_movements_date (movement_date)
 ) ENGINE=InnoDB;
 
+-- CUSTOMERS
+CREATE TABLE customers (
+  customer_id    INT UNSIGNED  NOT NULL AUTO_INCREMENT,
+  customer_name  VARCHAR(120)  NOT NULL,
+  phone          VARCHAR(30)   NOT NULL,              -- mobile number
+  street         VARCHAR(150)  NULL,                  -- street / building (optional)
+  barangay       VARCHAR(80)   NOT NULL,
+  city           VARCHAR(80)   NOT NULL,
+  province       VARCHAR(80)   NOT NULL,
+  archived_at    DATETIME      NULL DEFAULT NULL,     -- NULL = active, timestamp = archived (restorable)
+  created_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,  -- set once when the record is created
+  updated_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,  -- refreshed automatically on every change
+  CONSTRAINT pk_customers PRIMARY KEY (customer_id),
+  KEY idx_customers_name (customer_name),
+  KEY idx_customers_area (province, city, barangay)
+) ENGINE=InnoDB;
+
 -- SALES
 CREATE TABLE sales (
   sale_id         INT UNSIGNED  NOT NULL AUTO_INCREMENT,
   receipt_number  VARCHAR(20)   NOT NULL,
   user_id         INT UNSIGNED  NOT NULL,              -- the cashier who processed the sale
-  customer_name   VARCHAR(120)  NOT NULL DEFAULT 'Walk-in',
+  customer_id     INT UNSIGNED  NULL,                  -- registered customer; NULL = walk-in / older record
+  customer_name   VARCHAR(120)  NOT NULL DEFAULT 'Walk-in',  -- name as printed on the receipt (historical snapshot, kept even if the customer is edited later)
   payment_method  ENUM('Cash','GCash','Maya','Bank transfer','Charge account') NOT NULL,
   total_amount    DECIMAL(12,2) NOT NULL DEFAULT 0.00, -- set by the backend as SUM(sale_items.subtotal) inside the sale transaction
   sale_date       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -129,9 +178,12 @@ CREATE TABLE sales (
   CONSTRAINT uq_sales_receipt UNIQUE (receipt_number),
   CONSTRAINT fk_sales_user FOREIGN KEY (user_id) REFERENCES users (user_id)
     ON UPDATE CASCADE ON DELETE RESTRICT,
+  CONSTRAINT fk_sales_customer FOREIGN KEY (customer_id) REFERENCES customers (customer_id)
+    ON UPDATE CASCADE ON DELETE RESTRICT,
   CONSTRAINT chk_sales_total CHECK (total_amount >= 0),
   KEY idx_sales_date (sale_date),
   KEY idx_sales_user (user_id),
+  KEY idx_sales_customer (customer_id),
   KEY idx_sales_payment (payment_method)
 ) ENGINE=InnoDB;
 
@@ -176,10 +228,32 @@ CREATE TABLE settings (
   tax_rate        DECIMAL(5,2)     NOT NULL DEFAULT 12.00,
   reorder_level   INT              NOT NULL DEFAULT 20,
   receipt_footer  VARCHAR(255)     NULL,
+  updated_at      DATETIME         NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT pk_settings PRIMARY KEY (setting_id),
   CONSTRAINT chk_settings_single CHECK (setting_id = 1),
   CONSTRAINT chk_settings_tax CHECK (tax_rate >= 0 AND tax_rate <= 100)
 ) ENGINE=InnoDB;
+
+-- =============================================================================
+-- NO PERMANENT DELETION: the database refuses DELETE on business records (archive them instead).
+-- Single-statement triggers, so no DELIMITER change is needed when importing.
+-- =============================================================================
+CREATE TRIGGER trg_no_delete_categories BEFORE DELETE ON categories FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Records are never permanently deleted. Archive the record instead.';
+CREATE TRIGGER trg_no_delete_suppliers BEFORE DELETE ON suppliers FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Records are never permanently deleted. Archive the record instead.';
+CREATE TRIGGER trg_no_delete_customers BEFORE DELETE ON customers FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Records are never permanently deleted. Archive the record instead.';
+CREATE TRIGGER trg_no_delete_products BEFORE DELETE ON products FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Records are never permanently deleted. Archive the record instead.';
+CREATE TRIGGER trg_no_delete_users BEFORE DELETE ON users FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Records are never permanently deleted. Archive the record instead.';
+CREATE TRIGGER trg_no_delete_sales BEFORE DELETE ON sales FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Records are never permanently deleted. Archive the record instead.';
+CREATE TRIGGER trg_no_delete_sale_items BEFORE DELETE ON sale_items FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Records are never permanently deleted. Archive the record instead.';
+CREATE TRIGGER trg_no_delete_inventory_movements BEFORE DELETE ON inventory_movements FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Records are never permanently deleted. Archive the record instead.';
 
 -- =============================================================================
 -- Stock Keeper · Seed data (Filipino business records)
@@ -216,6 +290,17 @@ INSERT INTO suppliers (supplier_id, company_name, contact_person, phone, email, 
  (5,'San Pedro Electrical Supply','Noel Cabrera','0919 674 2285','noel@sanpedroelec.example','Brgy. Landayan, San Pedro City, Laguna'),
  (6,'Lipa Paints & Coatings Co.','Marites Landicho','0945 330 7918','accounts@lipapaints.example','Brgy. Sabang, Lipa City, Batangas');
 
+INSERT INTO customers (customer_id, customer_name, phone, street, barangay, city, province) VALUES
+ (1,'JM Dela Cruz Construction','0917 622 3041','National Highway','Halang','Calamba City','Laguna'),
+ (2,'Engr. Ramon Villanueva','0928 714 5530',NULL,'Real','Calamba City','Laguna'),
+ (3,'Aling Lourdes Magsaysay','0939 408 1127','Rizal Street','Landayan','San Pedro City','Laguna'),
+ (4,'Brgy. San Antonio Captain''s Office','0945 276 9083','Barangay Hall','San Antonio','Biñan City','Laguna'),
+ (5,'Mang Tony Carpentry','0906 531 7742',NULL,'Pasong Camachile','General Mariano Alvarez','Cavite'),
+ (6,'Kuya Joel Electrical Services','0977 349 6618','Purok 3','Canlubang','Calamba City','Laguna'),
+ (7,'Dra. Maricel Pangilinan','0918 205 4476','Mabini Street','Poblacion','Santa Rosa City','Laguna'),
+ (8,'Beth Tolentino Residence','0966 813 2290',NULL,'Banlic','Cabuyao City','Laguna'),
+ (9,'RPG Builders & Realty','0998 457 0135','Km 54, National Highway','Parian','Calamba City','Laguna');
+
 INSERT INTO products (product_id, sku, product_name, category_id, supplier_id, unit_price, stock_quantity, reorder_level, unit) VALUES
  (1,'CM-1001','Portland Cement 40 kg',1,1,265.00,520,80,'bag'),
  (2,'CM-1004','CHB 4" (100 mm)',1,1,14.00,1450,500,'pcs'),
@@ -245,18 +330,18 @@ INSERT INTO inventory_movements (movement_id, product_id, user_id, movement_type
  (9,13,3,'ADJ_OUT',2,'Count adjustment: damaged pails','2026-10-16 10:30:00'),
  (10,14,5,'ADJ_IN',1,'Count adjustment: found on shelf','2026-10-16 10:45:00');
 
-INSERT INTO sales (sale_id, receipt_number, user_id, customer_name, payment_method, sale_date) VALUES
- (1,'S-1001',4,'JM Dela Cruz Construction','Charge account','2026-10-10 09:12:00'),
- (2,'S-1002',6,'Walk-in','Cash','2026-10-11 13:40:00'),
- (3,'S-1003',4,'Engr. Ramon Villanueva','Bank transfer','2026-10-12 10:25:00'),
- (4,'S-1004',6,'Aling Lourdes Magsaysay','GCash','2026-10-12 16:05:00'),
- (5,'S-1005',4,'Brgy. San Antonio Captain''s Office','Charge account','2026-10-13 11:15:00'),
- (6,'S-1006',6,'Mang Tony Carpentry','Cash','2026-10-14 09:50:00'),
- (7,'S-1007',4,'Walk-in','Maya','2026-10-14 15:30:00'),
- (8,'S-1008',6,'Kuya Joel Electrical Services','GCash','2026-10-15 10:10:00'),
- (9,'S-1009',4,'Dra. Maricel Pangilinan','Bank transfer','2026-10-15 14:45:00'),
- (10,'S-1010',6,'Beth Tolentino Residence','Cash','2026-10-16 09:05:00'),
- (11,'S-1011',4,'RPG Builders & Realty','Charge account','2026-10-16 11:30:00');
+INSERT INTO sales (sale_id, receipt_number, user_id, customer_id, customer_name, payment_method, sale_date) VALUES
+ (1,'S-1001',4,1,'JM Dela Cruz Construction','Charge account','2026-10-10 09:12:00'),
+ (2,'S-1002',6,NULL,'Walk-in','Cash','2026-10-11 13:40:00'),
+ (3,'S-1003',4,2,'Engr. Ramon Villanueva','Bank transfer','2026-10-12 10:25:00'),
+ (4,'S-1004',6,3,'Aling Lourdes Magsaysay','GCash','2026-10-12 16:05:00'),
+ (5,'S-1005',4,4,'Brgy. San Antonio Captain''s Office','Charge account','2026-10-13 11:15:00'),
+ (6,'S-1006',6,5,'Mang Tony Carpentry','Cash','2026-10-14 09:50:00'),
+ (7,'S-1007',4,NULL,'Walk-in','Maya','2026-10-14 15:30:00'),
+ (8,'S-1008',6,6,'Kuya Joel Electrical Services','GCash','2026-10-15 10:10:00'),
+ (9,'S-1009',4,7,'Dra. Maricel Pangilinan','Bank transfer','2026-10-15 14:45:00'),
+ (10,'S-1010',6,8,'Beth Tolentino Residence','Cash','2026-10-16 09:05:00'),
+ (11,'S-1011',4,9,'RPG Builders & Realty','Charge account','2026-10-16 11:30:00');
 
 INSERT INTO sale_items (sale_id, product_id, quantity, unit_price) VALUES
  (1,2,300,14.00),(1,1,40,265.00),
@@ -273,6 +358,20 @@ INSERT INTO sale_items (sale_id, product_id, quantity, unit_price) VALUES
 
 -- sales.total_amount is derived from the line items (subtotal is a generated column)
 UPDATE sales s SET s.total_amount = (SELECT SUM(si.subtotal) FROM sale_items si WHERE si.sale_id = s.sale_id);
+-- Track creation and update dates
+ALTER TABLE users      ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at;
+ALTER TABLE categories ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
+ALTER TABLE suppliers  ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
+ALTER TABLE products   ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
+ALTER TABLE settings   ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
+
+-- Keep historical records: block hard deletes at the database level
+ALTER TABLE inventory_movements DROP FOREIGN KEY fk_movements_product,
+  ADD CONSTRAINT fk_movements_product FOREIGN KEY (product_id) REFERENCES products (product_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+ALTER TABLE sale_items DROP FOREIGN KEY fk_sale_items_sale,
+  ADD CONSTRAINT fk_sale_items_sale FOREIGN KEY (sale_id) REFERENCES sales (sale_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+ALTER TABLE activity_logs DROP FOREIGN KEY fk_logs_user,
+  ADD CONSTRAINT fk_logs_user FOREIGN KEY (user_id) REFERENCES users (user_id) ON UPDATE CASCADE ON DELETE RESTRICT;
 
 -- every sold line also appears in the stock ledger as an OUT movement (INSERT ... SELECT)
 INSERT INTO inventory_movements (product_id, user_id, movement_type, quantity, remarks, movement_date)
