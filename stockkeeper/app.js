@@ -54,6 +54,7 @@ document.addEventListener("click", (ev) => {
 
 /* ============ DATA  ============ */
 const db = {
+  cust: [],
   cats: [],
   sup: [],
   prod: [],
@@ -63,6 +64,9 @@ const db = {
   logs: [],
   set: { store: "Stock Keeper", tax: 12, reorder: 20, footer: "" },
 };
+/* Address is stored in separate columns: street (optional), barangay, city, province */
+const addr = (x) =>
+  [x.street, x.brgy && "Brgy. " + x.brgy, x.city, x.prov].filter(Boolean).join(", ");
 const P = (id) => db.prod.find((p) => p.id === id) || {};
 const total = (s) => s.items.reduce((a, i) => a + i.qty * i.price, 0);
 const nm = (l, id) => (db[l].find((x) => x.id === id) || { name: "—" }).name;
@@ -153,9 +157,15 @@ const archEmpty = (sel, what) =>
 const acts = (s, id) => {
   if (!can("manage")) return "";
   const it = db[S[s].k].find((x) => x.id === id);
+  // Edit: administrators and managers. Archive / Restore: administrators only.
   return it && it.arch
-    ? `<button class="b s" data-a="restore" data-s="${s}" data-id="${id}">Restore</button>`
-    : `<button class="b s" data-a="edit" data-s="${s}" data-id="${id}">Edit</button> <button class="b s" data-a="arch" data-s="${s}" data-id="${id}">Archive</button>`;
+    ? can("archive")
+      ? `<button class="b s" data-a="restore" data-s="${s}" data-id="${id}">Restore</button>`
+      : ""
+    : `<button class="b s" data-a="edit" data-s="${s}" data-id="${id}">Edit</button>` +
+        (can("archive")
+          ? ` <button class="b s" data-a="arch" data-s="${s}" data-id="${id}">Archive</button>`
+          : "");
 };
 /* Employee actions: Edit plus an Active/Inactive toggle (employees are never deleted or archived). */
 const empActs = (u) =>
@@ -169,6 +179,7 @@ const dlg = $("#dlg");
 dlg.addEventListener("click", (ev) => {
   if (ev.target.closest("[data-x]")) dlg.close();
 });
+dlg.addEventListener("close", () => (dlg.className = ""));
 function ask(msg, fn, label) {
   dlg.innerHTML = `<h3>Please confirm</h3><p>${msg}</p><div class="ft"><button class="b" data-x>Cancel</button><button class="b p" id="ok">${label || "Confirm"}</button></div>`;
   dlg.showModal();
@@ -184,7 +195,7 @@ const EMAIL_RE =
 const PH_RE = /^09\d{9}$/; /* 09XXXXXXXXX, exactly 11 digits */
 function openForm(title, fs, vals, save) {
   const ph = (f) => (f.ph ? ` placeholder="${e(f.ph)}"` : "");
-  dlg.innerHTML = `<form novalidate><h3>${title}</h3>${fs.map((f) => `<label>${f.l}${f.t == "select" ? `<select name="${f.n}">${f.ph ? `<option value="" disabled selected hidden>${e(f.ph)}</option>` : ""}${f.o.map((o) => `<option value="${o[0]}">${e(o[1])}</option>`).join("")}</select>` : f.t == "password" ? `<span class="pw"><input name="${f.n}" type="password"${ph(f)}>${PWBTN}</span>` : `<input name="${f.n}" type="${f.t || "text"}"${ph(f)}${f.t == "number" ? ` min="${f.min ?? 0}" step="${f.step || 1}"` : ""}${f.t == "tel" ? ' inputmode="numeric" maxlength="11" autocomplete="tel"' : ""}>`}<small class="er"></small></label>`).join("")}<div class="ft"><button type="button" class="b" data-x>Cancel</button><button class="b p">Save</button></div></form>`;
+  dlg.innerHTML = `<form novalidate><h3>${title}</h3>${fs.map((f) => `<label>${f.l}${f.t == "select" ? `<select name="${f.n}">${f.ph ? `<option value="" disabled selected hidden>${e(f.ph)}</option>` : ""}${f.o.map((o) => `<option value="${o[0]}">${e(o[1])}</option>`).join("")}</select>` : f.t == "password" ? `<span class="pw"><input name="${f.n}" type="password"${ph(f)}>${PWBTN}</span>` : `<input name="${f.n}" type="${f.t || "text"}"${f.ro ? " readonly" : ""}${f.t == "number" ? ` min="${f.min ?? 0}" step="${f.step || 1}"` : ""}>`}${f.h ? `<small class="hint">${f.h}</small>` : ""}<small class="er"></small></label>`).join("")}<div class="ft"><button type="button" class="b" data-x>Cancel</button><button class="b p">Save</button></div></form>`;
   const fm = dlg.querySelector("form");
   fs.forEach((f) => {
     let v = vals[f.n];
@@ -242,12 +253,35 @@ function openForm(title, fs, vals, save) {
 }
 
 /* ============ CRUD: products, categories, suppliers ============ */
+function nextSku(cid) {
+  const cat = db.cats.find((c) => c.id === cid);
+  if (!cat) return "";
+  const same = db.prod.find((p) => p.cat === cid && p.sku.includes("-"));
+  let pre;
+  if (same) pre = same.sku.split("-")[0];
+  else {
+    const w = cat.name.split(/[^A-Za-z]+/).filter(Boolean);
+    pre = (w.length > 1 ? w[0][0] + w[1][0] : (w[0] || "XX").slice(0, 2)).toUpperCase();
+  }
+  const top = Math.max(
+    cid * 1000,
+    ...db.prod
+      .filter((p) => p.sku.startsWith(pre + "-"))
+      .map((p) => parseInt(p.sku.split("-")[1], 10) || 0),
+  );
+  return pre + "-" + (top + 1);
+}
 const S = {
   prod: {
     k: "prod",
     t: "Product",
     f: () => [
-      { n: "sku", l: "SKU", ph: "e.g. CM-1001" },
+      {
+        n: "sku",
+        l: 'SKU <span class="auto" title="Auto-generated">*</span>',
+        ro: 1,
+        h: '<span class="auto">*</span> Auto-generated from the category. It cannot be edited.',
+      },
       { n: "name", l: "Product name", ph: "e.g. Portland Cement 40 kg" },
       {
         n: "cat",
@@ -297,9 +331,24 @@ const S = {
     f: () => [
       { n: "name", l: "Company", ph: "e.g. Calamba Cement & Masonry Depot" },
       { n: "contact", l: "Contact person", ph: "e.g. Juan Dela Cruz" },
-      { n: "city", l: "City / Province", ph: "e.g. Calamba City, Laguna" },
+      { n: "street", l: "Street / building (optional)", ph: "e.g. National Highway", opt: 1 },
+      { n: "brgy", l: "Barangay", ph: "e.g. Real" },
+      { n: "city", l: "City", ph: "e.g. Calamba City" },
+      { n: "prov", l: "Province", ph: "e.g. Laguna" },
       { n: "phone", l: "Phone", t: "tel", ph: "09XXXXXXXXX" },
       { n: "email", l: "Email", t: "email", ph: "name@company.com" },
+    ],
+  },
+  cust: {
+    k: "cust",
+    t: "Customer",
+    f: () => [
+      { n: "name", l: "Customer name", ph: "e.g. Engr. Ramon Villanueva" },
+      { n: "phone", l: "Mobile number", t: "tel", ph: "09XXXXXXXXX" },
+      { n: "street", l: "Street / building (optional)", ph: "e.g. National Highway", opt: 1 },
+      { n: "brgy", l: "Barangay", ph: "e.g. Halang" },
+      { n: "city", l: "City", ph: "e.g. Calamba City" },
+      { n: "prov", l: "Province", ph: "e.g. Laguna" },
     ],
   },
 };
@@ -307,19 +356,24 @@ const API = {
   prod: "product",
   cat: "category",
   sup: "supplier",
+  cust: "customer",
   emp: "employee",
 };
 function edit(s, id) {
-  if (!can(s == "emp" ? "users" : "manage")) return deny();
+  if (!can(s == "emp" ? "users" : s == "cust" ? "customers" : "manage"))
+    return deny();
   if (s == "emp" && id === me.id)
     return toast("Ask another administrator to edit your own record", "bad");
   const c = S[s],
     it = id
       ? db[c.k].find((x) => x.id === id)
       : s == "prod"
-        ? { min: db.set.reorder }
+        ? { min: db.set.reorder, sku: nextSku((db.cats[0] || {}).id) }
         : {};
   const fs = c.f();
+  // Only administrators and inventory staff may set stock quantities
+  if (s == "prod" && !can("stock"))
+    fs.splice(fs.findIndex((f) => f.n == "stock"), 1);
   if (s == "emp" && !id)
     fs.push({
       n: "pw",
@@ -329,15 +383,21 @@ function edit(s, id) {
       v: (x) => (x.length < 6 ? "Use at least 6 characters" : ""),
     });
   openForm((id ? "Edit " : "Add ") + c.t.toLowerCase(), fs, it, async (d) => {
-    if (!(await api("save_" + API[s], { ...d, id }))) return;
+    const j = await api("save_" + API[s], { ...d, id });
+    if (!j) return;
     await load();
     show(cur);
-    toast(c.t + (id ? " updated: " : " added: ") + d.name);
+    toast(
+      c.t + (id ? " updated: " : " added: ") + d.name + (j.sku && !id ? " (SKU " + j.sku + ")" : ""),
+    );
   });
+  if (s == "prod" && !id)
+    dlg.querySelector('[name="cat"]').onchange = (ev) =>
+      (dlg.querySelector('[name="sku"]').value = nextSku(+ev.target.value));
 }
 /* Archive instead of delete: the record stays in the database and can be restored. */
 function archive(s, id) {
-  if (!can("manage")) return deny();
+  if (!can("archive")) return deny();
   const c = S[s],
     it = db[c.k].find((x) => x.id === id);
   const why =
@@ -368,7 +428,10 @@ function setEmpStatus(id, status) {
   const it = db.emp.find((x) => x.id === id);
   if (!it) return;
   if (id === me.id)
-    return toast("You cannot change the status of your own account here", "bad");
+    return toast(
+      "You cannot change the status of your own account here",
+      "bad",
+    );
   if (
     status == "Inactive" &&
     it.role == "admin" &&
@@ -379,7 +442,9 @@ function setEmpStatus(id, status) {
     if (!(await api("set_employee_status", { id, status }))) return;
     await load();
     show(cur);
-    toast(`Employee ${status == "Active" ? "activated" : "deactivated"}: ${it.name}`);
+    toast(
+      `Employee ${status == "Active" ? "activated" : "deactivated"}: ${it.name}`,
+    );
   };
   if (status == "Active") return go();
   ask(
@@ -389,7 +454,7 @@ function setEmpStatus(id, status) {
   );
 }
 async function restore(s, id) {
-  if (!can("manage")) return deny();
+  if (!can("archive")) return deny();
   const c = S[s],
     it = db[c.k].find((x) => x.id === id);
   if (!(await api("restore_" + API[s], { id }))) return;
@@ -531,6 +596,7 @@ function rSup() {
           `<div class="pn"><span class="ch" data-st="--c:${cc(s.id)}"><span class="ms">local_shipping</span></span><b>${e(s.name)}</b>${archTag(s)}</div>`,
       ],
       ["Contact", (s) => e(s.contact)],
+      ["Barangay", (s) => e(s.brgy || "—")],
       ["City", (s) => e(s.city || "—")],
       ["Phone", (s) => e(s.phone), "m"],
       ["Email", (s) => e(s.email)],
@@ -539,11 +605,86 @@ function rSup() {
         (s) => actv("prod").filter((p) => p.sup === s.id).length,
         "m",
       ],
-      ["", (s) => acts("sup", s.id), "act"],
+      [
+        "",
+        (s) =>
+          `<button class="b s" data-a="supd" data-id="${s.id}">Details</button> ` +
+          acts("sup", s.id),
+        "act",
+      ],
     ],
     db.sup.filter(arf("#sa")),
     archEmpty("#sa", "suppliers") || "No suppliers yet.",
     archRow,
+  );
+}
+function supInfo(id) {
+  const s = db.sup.find((x) => x.id === id);
+  if (!s) return;
+  const ps = db.prod.filter((p) => p.sup === id),
+    h = db.mov
+      .filter((m) => m.type == "IN" && !m.adj && P(m.pid).sup === id)
+      .slice()
+      .reverse(),
+    qty = h.reduce((a, m) => a + m.qty, 0);
+  dlg.className = "wide";
+  dlg.innerHTML = `<h3>${e(s.name)}</h3>
+<div class="tw"><table><tbody>${[
+    ["Contact person", e(s.contact)],
+    ["Phone", e(s.phone)],
+    ["Email", e(s.email || "—")],
+    ["Address", e(addr(s) || "—")],
+    ["Products supplied", ps.length ? ps.map((p) => e(p.name)).join(", ") : "—"],
+  ]
+    .map((r) => `<tr><td><b>${r[0]}</b></td><td>${r[1]}</td></tr>`)
+    .join("")}</tbody></table></div>
+<h3 class="sh">Supplier history</h3>
+<p class="mu">${h.length ? `${h.length} deliver${h.length > 1 ? "ies" : "y"} · ${qty} units received · last on ${h[0].date}` : "No deliveries recorded yet."}</p>
+${
+  h.length
+    ? `<div class="tw hist"><table><thead><tr><th>Date</th><th>Product</th><th>Qty</th><th>Reference</th><th>Received by</th></tr></thead><tbody>${h
+        .map(
+          (m) =>
+            `<tr><td class="m">${m.date}</td><td>${e(P(m.pid).name || "—")}</td><td class="m">+${m.qty}</td><td>${e(m.note)}</td><td>${e(m.by || "—")}</td></tr>`,
+        )
+        .join("")}</tbody></table></div>`
+    : ""
+}
+<div class="ft"><button class="b p" data-x>Close</button></div>`;
+  dlg.showModal();
+}
+function rCust() {
+  const q = $("#cq").value.toLowerCase(),
+    mine = (c) => db.sales.filter((s) => s.cid === c.id);
+  tbl(
+    "#cutbl",
+    [
+      [
+        "Customer",
+        (c) =>
+          `<div class="pn"><span class="ch" data-st="--c:${cc(c.id)}"><span class="ms">person</span></span><b>${e(c.name)}</b></div>`,
+      ],
+      ["Mobile", (c) => e(c.phone || "—"), "m"],
+      ["Barangay", (c) => e(c.brgy)],
+      ["City", (c) => e(c.city)],
+      ["Province", (c) => e(c.prov)],
+      ["Sales", (c) => mine(c).length, "m"],
+      [
+        "Total purchases",
+        (c) => money(mine(c).reduce((a, s) => a + total(s), 0)),
+        "m",
+      ],
+      [
+        "",
+        (c) =>
+          can("customers")
+            ? `<button class="b s" data-a="edit" data-s="cust" data-id="${c.id}">Edit</button>`
+            : "",
+        "act",
+      ],
+    ],
+    db.cust.filter((c) => (c.name + " " + addr(c)).toLowerCase().includes(q)),
+    "No customers match your search. Add a customer to start selling.",
   );
 }
 function rMov() {
@@ -681,10 +822,19 @@ function mvForm(type) {
 
 /* ============ SALES ============ */
 function newSale() {
+  if (!db.cust.length)
+    return toast("Add a customer first (Customers page). Every sale needs a customer.", "bad");
   openForm(
     "New sale",
     [
-      { n: "cust", l: "Customer", ph: "e.g. Walk-in or customer name" },
+      {
+        n: "cid",
+        l: "Customer",
+        t: "select",
+        num: 1,
+        ph: "Select a customer",
+        o: db.cust.map((c) => [c.id, `${c.name} – ${c.city}`]),
+      },
       {
         n: "pid",
         l: "Product",
@@ -718,7 +868,7 @@ function newSale() {
     {},
     async (d) => {
       const j = await api("add_sale", {
-        cust: d.cust,
+        cid: d.cid,
         pid: d.pid,
         qty: d.qty,
         pay: d.pay,
@@ -749,6 +899,7 @@ const V = [
 let cur = "dashboard";
 // ============ ROLES, AUTH, EMPLOYEES, LOGS, SETTINGS ============
 V.push(
+  ["customers", "Customers", "groups", rCust],
   ["employees", "Employees", "badge", rEmp],
   ["logs", "Activity logs", "history", rLogs],
   ["settings", "Settings", "settings", rSet],
@@ -770,16 +921,38 @@ const VIEWS = {
     "suppliers",
     "movements",
     "sales",
+    "customers",
     "reports",
   ],
   inventory: ["dashboard", "products", "suppliers", "movements"],
-  cashier: ["sales", "products"],
+  cashier: ["sales", "customers", "products"],
 };
 const CAN = {
   manage: ["admin", "manager"],
   users: ["admin"],
   stock: ["admin", "inventory"],
   sell: ["admin", "cashier"],
+  archive: ["admin"],
+  customers: ["admin", "manager", "cashier"],
+};
+/* Clear responsibilities per role (shown on the Employees page) */
+const DUTY = {
+  admin: [
+    "Full control of the system: employee accounts, roles, activate/deactivate, archive and restore records, activity logs.",
+    "Nothing is restricted.",
+  ],
+  manager: [
+    "Maintains the catalog (products, prices, reorder levels, categories, suppliers) and customer records. Reviews sales, stock movements and reports.",
+    "Cannot process sales, change stock quantities, archive or restore records, or manage employees.",
+  ],
+  inventory: [
+    "Receives and issues stock, records count adjustments, checks suppliers and delivery history.",
+    "Cannot change products, prices, categories or suppliers, cannot sell, and cannot see reports or employees.",
+  ],
+  cashier: [
+    "Processes sales for registered customers and keeps customer records. Looks up products and stock.",
+    "Cannot change products, stock or suppliers, and cannot see reports or employees.",
+  ],
 };
 const can = (k) => !!me && CAN[k].includes(me.role);
 let me = null;
@@ -820,6 +993,7 @@ const GRP = {
     movements: 1,
     suppliers: 2,
     sales: 3,
+    customers: 3,
     reports: 4,
     employees: 5,
     logs: 5,
@@ -887,7 +1061,7 @@ function signUp() {
         l: "Role",
         t: "select",
         ph: "Select a role",
-        o: Object.entries(ROLE).filter((r) => r[0] != "admin"),
+        o: Object.entries(ROLE).filter((r) => !["admin", "manager"].includes(r[0])),
       },
       {
         n: "pw",
@@ -956,6 +1130,12 @@ function rEmp() {
     "No employees match your filter.",
     (u) => (u.status == "Inactive" ? "arch" : ""),
   );
+  $("#roles").innerHTML = `<h3>Role responsibilities</h3><div class="tw"><table><thead><tr><th>Role</th><th>Responsible for</th><th>Not allowed</th></tr></thead><tbody>${Object.keys(ROLE)
+    .map(
+      (r) =>
+        `<tr><td><b>${ROLE[r]}</b></td><td>${e(DUTY[r][0])}</td><td>${e(DUTY[r][1])}</td></tr>`,
+    )
+    .join("")}</tbody></table></div>`;
 }
 function rLogs() {
   const q = $("#lq").value.toLowerCase();
@@ -1185,6 +1365,7 @@ async function deactivateSelf() {
       toast("Your account has been deactivated.");
       me = null;
       Object.assign(db, {
+        cust: [],
         cats: [],
         sup: [],
         prod: [],
@@ -1202,10 +1383,13 @@ async function deactivateSelf() {
   );
 }
 async function signOut() {
+  if (!confirm("Are you sure you want to log out?")) return;
+
   await api("log", { text: "Signed out" }, true);
   await api("logout", {}, true);
   me = null;
   Object.assign(db, {
+    cust: [],
     cats: [],
     sup: [],
     prod: [],
@@ -1256,6 +1440,7 @@ document.addEventListener("click", (ev) => {
     signup: signUp,
     po: () => toast("Purchase orders are not enabled for this store yet"),
     sale: () => saleInfo(d.id),
+    supd: () => supInfo(+d.id),
     exp: () => toast("Preparing " + d.t + " export"),
     adj: () => (can("stock") ? adjust(+d.id) : deny()),
     set: () => (ADM() ? setForm() : deny()),
@@ -1271,7 +1456,7 @@ document.addEventListener("click", (ev) => {
     mypw: changeMyPw,
   })[d.a]();
 });
-["#pq", "#sq"].forEach((s) => ($(s).oninput = () => show(cur)));
+["#pq", "#sq", "#cq"].forEach((s) => ($(s).oninput = () => show(cur)));
 ["#pc", "#mf", "#pa", "#ca", "#sa", "#ea"].forEach(
   (s) => ($(s).onchange = () => show(cur)),
 );
@@ -1661,16 +1846,16 @@ function tlHtml(L) {
             : /activated/i.test(l.a)
               ? ["person_check", "var(--k-add)"]
               : /archived/.test(l.a)
-            ? ["inventory_2", "var(--k-stock)"]
-            : /restored/.test(l.a)
-              ? ["unarchive", "var(--k-add)"]
-              : /deleted/.test(l.a)
-                ? ["delete", "var(--k-del)"]
-                : /added|created/i.test(l.a)
-                  ? ["add_circle", "var(--k-add)"]
-                  : /Signed/.test(l.a)
-                    ? ["login", "var(--k-in)"]
-                    : ["edit", "var(--k-edit)"];
+                ? ["inventory_2", "var(--k-stock)"]
+                : /restored/.test(l.a)
+                  ? ["unarchive", "var(--k-add)"]
+                  : /deleted/.test(l.a)
+                    ? ["delete", "var(--k-del)"]
+                    : /added|created/i.test(l.a)
+                      ? ["add_circle", "var(--k-add)"]
+                      : /Signed/.test(l.a)
+                        ? ["login", "var(--k-in)"]
+                        : ["edit", "var(--k-edit)"];
       const day = l.t.slice(0, 10),
         hd = day != d ? `<div class="tld">${(d = day)}</div>` : "";
       return (
