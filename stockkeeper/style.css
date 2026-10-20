@@ -503,6 +503,12 @@ label.e input,
 label.e select {
   border-color: var(--bd);
 }
+label.e input:focus,
+label.e select:focus {
+  border-color: var(--bd);
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bd) 28%, transparent);
+}
 .er {
   display: block;
   color: var(--bd);
