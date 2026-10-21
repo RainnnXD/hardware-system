@@ -1511,3 +1511,20 @@ dialog .hist {
   max-height: 260px;
   overflow: auto;
 }
+
+/*SUPPLIER DETAILS PANEL (details first, history below)*/
+#supdet h3 {
+  margin-bottom: 12px;
+}
+#supdet .sh {
+  margin-top: 20px;
+}
+#supdet .hist {
+  max-height: 260px;
+  overflow: auto;
+}
+#supdet .ft {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
+}
