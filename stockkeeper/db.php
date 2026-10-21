@@ -2,7 +2,7 @@
 
 $host = "127.0.0.1";
 $username = "root";
-$password = "010329_Jv"; // Sariling password ng database SQL mo.
+$password = ""; // Sariling password ng database SQL mo.
 $database = "stockkeeper_db";
 $port = 3306;
 

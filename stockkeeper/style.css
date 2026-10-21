@@ -14,6 +14,13 @@
   --bd: #e0392f;
   --sb: #0a1630;
   --hd: #f5f7fb;
+  --k-sale: #4f6d8a;
+  --k-stock: #d97706;
+  --k-del: #b3392b;
+  --k-add: #2f6f4f;
+  --k-in: #64748b;
+  --k-edit: #34495e;
+  color-scheme: light;
   --sh:
     0 1px 2px rgba(14, 26, 46, 0.05), 0 12px 28px -14px rgba(14, 26, 46, 0.18);
   --f: "Plus Jakarta Sans", system-ui, sans-serif;
@@ -22,6 +29,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
+    --ico-filter: invert(1);
     --bg: #0a1120;
     --pn: #111b30;
     --ink: #e8edf5;
@@ -36,6 +44,12 @@
     --bd: #f87171;
     --sb: #060c1a;
     --hd: #15203a;
+    --k-sale: #8fb4dc;
+    --k-stock: #fbbf24;
+    --k-del: #f87171;
+    --k-add: #4ade80;
+    --k-in: #a3b1c6;
+    --k-edit: #b4c4d9;
     --sh: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 28px -14px rgba(0, 0, 0, 0.6);
   }
 }
@@ -43,6 +57,7 @@
 /*BASE COLORS OF THE SYSTEM OON DARK MODE*/
 :root[data-theme="dark"] {
   color-scheme: dark;
+  --ico-filter: invert(1);
   --bg: #0a1120;
   --pn: #111b30;
   --ink: #e8edf5;
@@ -57,6 +72,12 @@
   --bd: #f87171;
   --sb: #060c1a;
   --hd: #15203a;
+  --k-sale: #8fb4dc;
+  --k-stock: #fbbf24;
+  --k-del: #f87171;
+  --k-add: #4ade80;
+  --k-in: #a3b1c6;
+  --k-edit: #b4c4d9;
   --sh: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 28px -14px rgba(0, 0, 0, 0.6);
 }
 
@@ -374,7 +395,7 @@ body.home .ph {
 }
 .card.tw {
   padding: 0;
-  overflow: hidden;
+  overflow: auto;
 }
 .card.tw > .mu {
   padding: 16px;
@@ -481,6 +502,12 @@ label select {
 label.e input,
 label.e select {
   border-color: var(--bd);
+}
+label.e input:focus,
+label.e select:focus {
+  border-color: var(--bd);
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bd) 28%, transparent);
 }
 .er {
   display: block;
@@ -1338,4 +1365,149 @@ dialog h3 {
   .s3 {
     grid-column: span 12;
   }
+}
+
+/*DARK MODE FIXES AND THEME-AWARE EXTRAS*/
+a:hover {
+  color: inherit; /* Bootstrap's blue a:hover is unreadable on dark panels */
+}
+.va:hover,
+.nh a:hover {
+  color: var(--ac);
+}
+::placeholder {
+  color: var(--mu);
+  opacity: 0.75;
+}
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+select:-webkit-autofill {
+  -webkit-text-fill-color: var(--ink);
+  caret-color: var(--ink);
+  box-shadow: 0 0 0 1000px var(--pn) inset;
+  transition: background-color 9999s ease-out;
+}
+input[type="search"]::-webkit-search-cancel-button {
+  filter: var(--ico-filter, none);
+}
+
+/*PASSWORD FIELD WITH SHOW/HIDE BUTTON*/
+.pw {
+  position: relative;
+  display: block;
+  margin-top: 4px;
+}
+.pw input {
+  margin-top: 0;
+  padding-right: 46px;
+}
+.pwt {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--mu);
+}
+.pwt:hover {
+  color: var(--ink);
+  background: var(--hd);
+}
+.pwt:focus-visible {
+  outline: 3px solid var(--ac);
+  outline-offset: 1px;
+}
+.pwt .ms {
+  font-size: 20px;
+}
+
+/*THEME TOGGLE ON THE LOGIN SCREEN*/
+.lgr {
+  position: relative;
+}
+.lgr .lgt {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+}
+/*DARK MODE: Bootstrap's .card sets its own text colour (#212529), which made
+  every table and heading inside a card unreadable on the dark panels.
+  Map Bootstrap's variables onto this theme's tokens so both themes agree.*/
+:root,
+:root[data-theme] {
+  --bs-body-color: var(--ink);
+  --bs-body-bg: var(--bg);
+  --bs-emphasis-color: var(--ink);
+  --bs-secondary-color: var(--mu);
+  --bs-border-color: var(--ln);
+  --bs-heading-color: inherit;
+  --bs-card-color: var(--ink);
+  --bs-card-bg: var(--pn);
+}
+.card {
+  color: var(--ink);
+}
+select option {
+  background: var(--pn);
+  color: var(--ink);
+}
+dialog,
+.pop,
+.w {
+  color: var(--ink);
+}
+
+/*ARCHIVED RECORDS (dimmed rows, action buttons stay fully readable)*/
+tr.arch td {
+  opacity: 0.62;
+}
+tr.arch td.act {
+  opacity: 1;
+}
+
+/*SIDEBAR ACCOUNT LINKS (Profile, Settings, Logout)*/
+nav.sfn {
+  flex: none;
+  padding-bottom: 4px;
+}
+.auto {
+  color: var(--bd);
+  font-weight: 800;
+}
+input[readonly] {
+  background: var(--hd);
+  color: var(--mu);
+  font-family: "IBM Plex Mono", monospace;
+  cursor: not-allowed;
+}
+.hint {
+  display: block;
+  margin-top: 4px;
+  color: var(--mu);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+dialog.wide {
+  width: min(760px, 94vw);
+  overflow: auto;
+}
+dialog .sh {
+  margin-top: 20px;
+}
+dialog .hist {
+  max-height: 260px;
+  overflow: auto;
 }

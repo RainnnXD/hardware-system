@@ -11,7 +11,7 @@ CREATE DATABASE IF NOT EXISTS stockkeeper_db CHARACTER SET utf8mb4 COLLATE utf8m
 USE stockkeeper_db;
 
 SET FOREIGN_KEY_CHECKS = 0;
-DROP TABLE IF EXISTS settings, activity_logs, sale_items, sales, inventory_movements,
+DROP TABLE IF EXISTS settings, activity_logs, sale_items, sales, customers, inventory_movements,
                      products, suppliers, categories, users, roles;
 SET FOREIGN_KEY_CHECKS = 1;
 
@@ -35,6 +35,7 @@ CREATE TABLE users (
   phone          VARCHAR(30)      NULL,
   status         ENUM('Active','Inactive') NOT NULL DEFAULT 'Active',
   created_at     TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  -- Employees are never deleted or archived: `status` (Active/Inactive) controls sign-in.
   CONSTRAINT pk_users PRIMARY KEY (user_id),
   CONSTRAINT uq_users_username UNIQUE (username),
   CONSTRAINT uq_users_email    UNIQUE (email),
@@ -50,6 +51,7 @@ CREATE TABLE categories (
   category_id    SMALLINT UNSIGNED NOT NULL AUTO_INCREMENT,
   category_name  VARCHAR(60)       NOT NULL,
   description    VARCHAR(255)      NULL,
+  archived_at    DATETIME         NULL DEFAULT NULL,  -- NULL = active, timestamp = archived (restorable)
   CONSTRAINT pk_categories PRIMARY KEY (category_id),
   CONSTRAINT uq_categories_name UNIQUE (category_name)
 ) ENGINE=InnoDB;
@@ -61,9 +63,28 @@ CREATE TABLE suppliers (
   contact_person  VARCHAR(100)      NOT NULL,
   phone           VARCHAR(30)       NOT NULL,
   email           VARCHAR(120)      NULL,
-  address         VARCHAR(255)      NOT NULL,
+  street          VARCHAR(120)      NULL,              -- optional (street, building, highway)
+  barangay        VARCHAR(80)       NOT NULL,
+  city            VARCHAR(80)       NOT NULL,
+  province        VARCHAR(80)       NOT NULL,
+  archived_at    DATETIME         NULL DEFAULT NULL,  -- NULL = active, timestamp = archived (restorable)
   CONSTRAINT pk_suppliers PRIMARY KEY (supplier_id),
   CONSTRAINT uq_suppliers_company UNIQUE (company_name)
+) ENGINE=InnoDB;
+
+-- CUSTOMERS (every sale must be linked to one of these records)
+CREATE TABLE customers (
+  customer_id    INT UNSIGNED  NOT NULL AUTO_INCREMENT,
+  customer_name  VARCHAR(120)  NOT NULL,
+  phone          VARCHAR(30)   NOT NULL,
+  street         VARCHAR(120)  NULL,                  -- optional
+  barangay       VARCHAR(80)   NOT NULL,
+  city           VARCHAR(80)   NOT NULL,
+  province       VARCHAR(80)   NOT NULL,
+  created_at     TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT pk_customers PRIMARY KEY (customer_id),
+  KEY idx_customers_name (customer_name),
+  KEY idx_customers_location (city, barangay)
 ) ENGINE=InnoDB;
 
 -- PRODUCTS
@@ -77,6 +98,7 @@ CREATE TABLE products (
   stock_quantity  INT               NOT NULL DEFAULT 0,
   reorder_level   INT               NOT NULL DEFAULT 10,
   unit            VARCHAR(20)       NOT NULL DEFAULT 'pcs',
+  archived_at    DATETIME         NULL DEFAULT NULL,  -- NULL = active, timestamp = archived (restorable)
   CONSTRAINT pk_products PRIMARY KEY (product_id),
   CONSTRAINT uq_products_sku UNIQUE (sku),
   CONSTRAINT fk_products_category FOREIGN KEY (category_id) REFERENCES categories (category_id)
@@ -117,7 +139,7 @@ CREATE TABLE sales (
   sale_id         INT UNSIGNED  NOT NULL AUTO_INCREMENT,
   receipt_number  VARCHAR(20)   NOT NULL,
   user_id         INT UNSIGNED  NOT NULL,              -- the cashier who processed the sale
-  customer_name   VARCHAR(120)  NOT NULL DEFAULT 'Walk-in',
+  customer_id     INT UNSIGNED  NOT NULL,              -- the customer this sale is linked to (required)
   payment_method  ENUM('Cash','GCash','Maya','Bank transfer','Charge account') NOT NULL,
   total_amount    DECIMAL(12,2) NOT NULL DEFAULT 0.00, -- set by the backend as SUM(sale_items.subtotal) inside the sale transaction
   sale_date       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -125,9 +147,12 @@ CREATE TABLE sales (
   CONSTRAINT uq_sales_receipt UNIQUE (receipt_number),
   CONSTRAINT fk_sales_user FOREIGN KEY (user_id) REFERENCES users (user_id)
     ON UPDATE CASCADE ON DELETE RESTRICT,
+  CONSTRAINT fk_sales_customer FOREIGN KEY (customer_id) REFERENCES customers (customer_id)
+    ON UPDATE CASCADE ON DELETE RESTRICT,
   CONSTRAINT chk_sales_total CHECK (total_amount >= 0),
   KEY idx_sales_date (sale_date),
   KEY idx_sales_user (user_id),
+  KEY idx_sales_customer (customer_id),
   KEY idx_sales_payment (payment_method)
 ) ENGINE=InnoDB;
 
@@ -204,13 +229,13 @@ INSERT INTO categories (category_id, category_name, description) VALUES
  (6,'Paint & Sealants','Latex paint, roof sealant'),
  (7,'Fasteners','Nails, screws, bolts');
 
-INSERT INTO suppliers (supplier_id, company_name, contact_person, phone, email, address) VALUES
- (1,'Calamba Cement & Masonry Depot','Ernesto Dimaculangan','0917 812 4405','orders@calambacement.example','Brgy. Real, Calamba City, Laguna'),
- (2,'Batangas Steel Trading Corp.','Lorna Macalintal','0928 553 1076','sales@batangassteel.example','Brgy. Pallocan West, Batangas City, Batangas'),
- (3,'Imus Lumber & Plywood Center','Rodel Bautista','0998 217 6630','imuslumber@trade.example','Brgy. Anabu II-A, Imus City, Cavite'),
- (4,'Valenzuela Pipe & Fittings Supply','Cherry Anne Santos','(02) 8365 1420','benta@valpipe.example','MacArthur Highway, Brgy. Karuhatan, Valenzuela City, Metro Manila'),
- (5,'San Pedro Electrical Supply','Noel Cabrera','0919 674 2285','noel@sanpedroelec.example','Brgy. Landayan, San Pedro City, Laguna'),
- (6,'Lipa Paints & Coatings Co.','Marites Landicho','0945 330 7918','accounts@lipapaints.example','Brgy. Sabang, Lipa City, Batangas');
+INSERT INTO suppliers (supplier_id, company_name, contact_person, phone, email, street, barangay, city, province) VALUES
+ (1,'Calamba Cement & Masonry Depot','Ernesto Dimaculangan','0917 812 4405','orders@calambacement.example',NULL,'Real','Calamba City','Laguna'),
+ (2,'Batangas Steel Trading Corp.','Lorna Macalintal','0928 553 1076','sales@batangassteel.example',NULL,'Pallocan West','Batangas City','Batangas'),
+ (3,'Imus Lumber & Plywood Center','Rodel Bautista','0998 217 6630','imuslumber@trade.example',NULL,'Anabu II-A','Imus City','Cavite'),
+ (4,'Valenzuela Pipe & Fittings Supply','Cherry Anne Santos','(02) 8365 1420','benta@valpipe.example','MacArthur Highway','Karuhatan','Valenzuela City','Metro Manila'),
+ (5,'San Pedro Electrical Supply','Noel Cabrera','0919 674 2285','noel@sanpedroelec.example',NULL,'Landayan','San Pedro City','Laguna'),
+ (6,'Lipa Paints & Coatings Co.','Marites Landicho','0945 330 7918','accounts@lipapaints.example',NULL,'Sabang','Lipa City','Batangas');
 
 INSERT INTO products (product_id, sku, product_name, category_id, supplier_id, unit_price, stock_quantity, reorder_level, unit) VALUES
  (1,'CM-1001','Portland Cement 40 kg',1,1,265.00,520,80,'bag'),
@@ -241,18 +266,31 @@ INSERT INTO inventory_movements (movement_id, product_id, user_id, movement_type
  (9,13,3,'ADJ_OUT',2,'Count adjustment: damaged pails','2026-10-16 10:30:00'),
  (10,14,5,'ADJ_IN',1,'Count adjustment: found on shelf','2026-10-16 10:45:00');
 
-INSERT INTO sales (sale_id, receipt_number, user_id, customer_name, payment_method, sale_date) VALUES
- (1,'S-1001',4,'JM Dela Cruz Construction','Charge account','2026-10-10 09:12:00'),
- (2,'S-1002',6,'Walk-in','Cash','2026-10-11 13:40:00'),
- (3,'S-1003',4,'Engr. Ramon Villanueva','Bank transfer','2026-10-12 10:25:00'),
- (4,'S-1004',6,'Aling Lourdes Magsaysay','GCash','2026-10-12 16:05:00'),
- (5,'S-1005',4,'Brgy. San Antonio Captain''s Office','Charge account','2026-10-13 11:15:00'),
- (6,'S-1006',6,'Mang Tony Carpentry','Cash','2026-10-14 09:50:00'),
- (7,'S-1007',4,'Walk-in','Maya','2026-10-14 15:30:00'),
- (8,'S-1008',6,'Kuya Joel Electrical Services','GCash','2026-10-15 10:10:00'),
- (9,'S-1009',4,'Dra. Maricel Pangilinan','Bank transfer','2026-10-15 14:45:00'),
- (10,'S-1010',6,'Beth Tolentino Residence','Cash','2026-10-16 09:05:00'),
- (11,'S-1011',4,'RPG Builders & Realty','Charge account','2026-10-16 11:30:00');
+INSERT INTO customers (customer_id, customer_name, phone, street, barangay, city, province) VALUES
+ (1,'JM Dela Cruz Construction','09175550101',NULL,'Banay-Banay','Cabuyao City','Laguna'),
+ (2,'Pedro Alcantara','09185550102',NULL,'Real','Calamba City','Laguna'),
+ (3,'Engr. Ramon Villanueva','09195550103',NULL,'Halang','Calamba City','Laguna'),
+ (4,'Aling Lourdes Magsaysay','09205550104',NULL,'Pulo','Cabuyao City','Laguna'),
+ (5,'Brgy. San Antonio Captain''s Office','09215550105',NULL,'San Antonio','San Pedro City','Laguna'),
+ (6,'Mang Tony Carpentry','09225550106',NULL,'Landayan','San Pedro City','Laguna'),
+ (7,'Rosario Dimagiba','09235550107',NULL,'Parian','Calamba City','Laguna'),
+ (8,'Kuya Joel Electrical Services','09245550108',NULL,'Mamatid','Cabuyao City','Laguna'),
+ (9,'Dra. Maricel Pangilinan','09255550109',NULL,'Batong Malake','Los Baños','Laguna'),
+ (10,'Beth Tolentino Residence','09265550110',NULL,'Bagong Kalsada','Calamba City','Laguna'),
+ (11,'RPG Builders & Realty','09275550111','National Highway','Real','Calamba City','Laguna');
+
+INSERT INTO sales (sale_id, receipt_number, user_id, customer_id, payment_method, sale_date) VALUES
+ (1,'S-1001',4,1,'Charge account','2026-10-10 09:12:00'),
+ (2,'S-1002',6,2,'Cash','2026-10-11 13:40:00'),
+ (3,'S-1003',4,3,'Bank transfer','2026-10-12 10:25:00'),
+ (4,'S-1004',6,4,'GCash','2026-10-12 16:05:00'),
+ (5,'S-1005',4,5,'Charge account','2026-10-13 11:15:00'),
+ (6,'S-1006',6,6,'Cash','2026-10-14 09:50:00'),
+ (7,'S-1007',4,7,'Maya','2026-10-14 15:30:00'),
+ (8,'S-1008',6,8,'GCash','2026-10-15 10:10:00'),
+ (9,'S-1009',4,9,'Bank transfer','2026-10-15 14:45:00'),
+ (10,'S-1010',6,10,'Cash','2026-10-16 09:05:00'),
+ (11,'S-1011',4,11,'Charge account','2026-10-16 11:30:00');
 
 INSERT INTO sale_items (sale_id, product_id, quantity, unit_price) VALUES
  (1,2,300,14.00),(1,1,40,265.00),
