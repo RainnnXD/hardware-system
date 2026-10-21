@@ -57,7 +57,6 @@ $CAN = [
     "users"  => ["admin"],
     "stock"  => ["admin", "inventory"],
     "sell"   => ["admin", "cashier"],
-    "customers" => ["admin", "manager", "cashier"],
 ];
 
 function current_user() {
@@ -118,6 +117,20 @@ function make_user($name, $title, $roleKey, $pw, $phone = null, $status = "Activ
         [$name, $username, $email, $hash, $rid, $title, $phone, $status]);
     return $conn->insert_id;
 }
+function next_sku($cat) {
+    $c = rows("SELECT category_name FROM categories WHERE category_id = ?", "i", [$cat])[0] ?? null;
+    if (!$c) fail("Choose a valid category");
+    $same = rows("SELECT sku FROM products WHERE category_id = ? AND sku LIKE '%-%' ORDER BY product_id LIMIT 1", "i", [$cat])[0] ?? null;
+    if ($same) {
+        $pre = explode("-", $same["sku"])[0];
+    } else {
+        $w = array_values(array_filter(preg_split('/[^A-Za-z]+/', $c["category_name"])));
+        $pre = strtoupper(count($w) > 1 ? $w[0][0] . $w[1][0] : substr($w[0] ?? "XX", 0, 2));
+    }
+    $top = (int)rows("SELECT COALESCE(MAX(CAST(SUBSTRING_INDEX(sku, '-', -1) AS UNSIGNED)), 0) m FROM products WHERE sku LIKE CONCAT(?, '-%')",
+                     "s", [$pre])[0]["m"];
+    return $pre . "-" . (max($top, $cat * 1000) + 1);
+}
 function other_active_admins($excludeId) {
     return (int)rows("SELECT COUNT(*) c FROM users WHERE role_id = 1 AND status = 'Active' AND user_id <> ?", "i", [$excludeId])[0]["c"];
 }
@@ -133,7 +146,6 @@ $ARCHIVABLE = [
     "product"  => ["products",   "product_id",  "manage"],
     "category" => ["categories", "category_id", "manage"],
     "supplier" => ["suppliers",  "supplier_id", "manage"],
-    "customer" => ["customers",  "customer_id", "manage"],
 ];
 if (preg_match('/^(archive|restore)_([a-z]+)$/', $action, $m) && isset($ARCHIVABLE[$m[2]])) {
     $doArchive = $m[1] === "archive";
@@ -227,7 +239,7 @@ case "register": // public sign-up. Administrators cannot be created this way.
     $pw = (string)($in["password"] ?? "");
     if ($name === "") fail("Full name is required");
     if (strlen($pw) < 6) fail("Use at least 6 characters for the password");
-    if (!isset($ROLE_ID[$role]) || $role === "admin") fail("Choose a valid role. Administrators are created by an existing administrator.");
+    if (!isset($ROLE_ID[$role]) || in_array($role, ["admin", "manager"])) fail("Choose a valid role. Administrator and Manager accounts are created by an administrator.");
     $newId = make_user($name, $title, $role, $pw);
     $uname = rows("SELECT username FROM users WHERE user_id = ?", "i", [$newId])[0]["username"] ?? "";
     out(["id" => $newId, "username" => $uname]);
@@ -242,8 +254,8 @@ case "bootstrap":
         rows("SELECT category_id, category_name, description, archived_at IS NOT NULL AS arch, " . DTA . " FROM categories ORDER BY category_id DESC"));
 
     $data["sup"] = array_map(fn($r) => ["id" => (int)$r["supplier_id"], "name" => $r["company_name"], "contact" => $r["contact_person"],
-        "phone" => $r["phone"], "email" => $r["email"] ?? "", "city" => $r["address"], "arch" => (bool)$r["arch"], "cr" => $r["cr"], "up" => $r["up"], "ar" => $r["ar"]],
-        rows("SELECT supplier_id, company_name, contact_person, phone, email, address, archived_at IS NOT NULL AS arch, " . DTA . " FROM suppliers ORDER BY supplier_id DESC"));
+        "phone" => $r["phone"], "email" => $r["email"] ?? "", "city" => $r["address"], "arch" => (bool)$r["arch"]],
+        rows("SELECT supplier_id, company_name, contact_person, phone, email, address, archived_at IS NOT NULL AS arch FROM suppliers ORDER BY supplier_id DESC"));
 
     $data["prod"] = array_map(fn($r) => ["id" => (int)$r["product_id"], "sku" => $r["sku"], "name" => $r["product_name"],
         "cat" => (int)$r["category_id"], "sup" => (int)$r["supplier_id"], "price" => (float)$r["unit_price"],
@@ -252,7 +264,7 @@ case "bootstrap":
               FROM products ORDER BY product_id DESC"));
 
     $data["mov"] = array_map(fn($r) => ["id" => (int)$r["movement_id"], "date" => $r["d"], "pid" => (int)$r["product_id"],
-        "type" => substr($r["movement_type"], -2) === "IN" ? "IN" : "OUT", "qty" => (int)$r["quantity"], "adj" => substr($r["movement_type"], 0, 3) === "ADJ",
+        "type" => substr($r["movement_type"], -2) === "IN" ? "IN" : "OUT", "qty" => (int)$r["quantity"],
         "note" => $r["remarks"] ?: "—", "by" => $r["full_name"]],
         rows("SELECT m.movement_id, DATE_FORMAT(m.movement_date, '%Y-%m-%d %H:%i') d, m.product_id, m.movement_type, m.quantity, m.remarks, u.full_name
               FROM inventory_movements m JOIN users u ON u.user_id = m.user_id
@@ -267,9 +279,9 @@ case "bootstrap":
     foreach (rows("SELECT sale_id, product_id, product_name, quantity, unit_price FROM sale_items ORDER BY sale_item_id") as $r) {
         $items[(int)$r["sale_id"]][] = ["pid" => (int)$r["product_id"], "name" => $r["product_name"], "qty" => (int)$r["quantity"], "price" => (float)$r["unit_price"]];
     }
-    $data["sales"] = array_map(fn($r) => ["id" => $r["receipt_number"], "date" => $r["d"], "cid" => $r["customer_id"] === null ? null : (int)$r["customer_id"], "cust" => $r["customer_name"],
+    $data["sales"] = array_map(fn($r) => ["id" => $r["receipt_number"], "date" => $r["d"], "cust" => $r["customer_name"],
         "pay" => $r["payment_method"], "by" => $r["full_name"], "items" => $items[(int)$r["sale_id"]] ?? []],
-        rows("SELECT s.sale_id, s.receipt_number, DATE_FORMAT(s.sale_date, '%Y-%m-%d %H:%i') d, s.customer_id, s.customer_name, s.payment_method, u.full_name
+        rows("SELECT s.sale_id, s.receipt_number, DATE_FORMAT(s.sale_date, '%Y-%m-%d %H:%i') d, s.customer_name, s.payment_method, u.full_name
               FROM sales s JOIN users u ON u.user_id = s.user_id
               ORDER BY s.sale_date, s.sale_id"));
 
@@ -308,18 +320,20 @@ case "bootstrap":
 case "save_product":
     $u = need("manage");
     $id = (int)($in["id"] ?? 0);
-    $sku = $str("sku", 30); $name = $str("name", 150); $unit = $str("unit", 20);
+    $name = $str("name", 150); $unit = $str("unit", 20);
     $cat = (int)($in["cat"] ?? 0); $sup = (int)($in["sup"] ?? 0);
-    $price = (float)($in["price"] ?? 0); $stock = (int)($in["stock"] ?? 0); $min = (int)($in["min"] ?? 0);
-    if ($sku === "" || $name === "" || $unit === "") fail("SKU, name and unit are required");
+    $price = (float)($in["price"] ?? 0); $stock = in_array($u["role"], $CAN["stock"]) ? (int)($in["stock"] ?? 0) : null; $min = (int)($in["min"] ?? 0);
+    if ($name === "" || $unit === "") fail("Name and unit are required");
     if ($price <= 0) fail("Price must be greater than zero");
     if ($stock < 0 || $min < 0) fail("Stock and reorder level cannot be negative");
     if (!rows("SELECT 1 FROM categories WHERE category_id = ? AND archived_at IS NULL", "i", [$cat])) fail("Choose an active category");
     if (!rows("SELECT 1 FROM suppliers WHERE supplier_id = ? AND archived_at IS NULL", "i", [$sup])) fail("Choose an active supplier");
     $conn->begin_transaction();
     if ($id) {
-        $old = rows("SELECT stock_quantity FROM products WHERE product_id = ? FOR UPDATE", "i", [$id])[0] ?? null;
+        $old = rows("SELECT sku, stock_quantity FROM products WHERE product_id = ? FOR UPDATE", "i", [$id])[0] ?? null;
         if (!$old) fail("Product not found", 404);
+        $sku = $old["sku"];
+        if ($stock === null) $stock = (int)$old["stock_quantity"]; // managers cannot change quantities
         run("UPDATE products SET sku=?, product_name=?, category_id=?, supplier_id=?, unit_price=?, stock_quantity=?, reorder_level=?, unit=?
              WHERE product_id=?", "ssiidiisi", [$sku, $name, $cat, $sup, $price, $stock, $min, $unit, $id]);
         $diff = $stock - (int)$old["stock_quantity"];
@@ -328,6 +342,8 @@ case "save_product":
                 "iisi", [$id, $u["id"], $diff > 0 ? "ADJ_IN" : "ADJ_OUT", abs($diff)]);
         }
     } else {
+        $sku = next_sku($cat);
+        if ($stock === null) $stock = 0; // opening stock is received by inventory staff
         run("INSERT INTO products (sku, product_name, category_id, supplier_id, unit_price, stock_quantity, reorder_level, unit)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)", "ssiidiis", [$sku, $name, $cat, $sup, $price, $stock, $min, $unit]);
         $newId = $conn->insert_id;
@@ -337,7 +353,7 @@ case "save_product":
         }
     }
     $conn->commit();
-    out(["ok" => true]);
+    out(["ok" => true, "sku" => $sku]);
 
 /* ====================== CATEGORIES ====================== */
 case "save_category":
@@ -355,16 +371,37 @@ case "save_category":
 case "save_supplier":
     need("manage");
     $id = (int)($in["id"] ?? 0);
-    $name = $str("name", 120); $contact = $str("contact", 100); $city = $str("city", 255);
+    $name = $str("name", 120); $contact = $str("contact", 100);
+    $street = $str("street", 120); $brgy = $str("brgy", 80); $city = $str("city", 80); $prov = $str("prov", 80);
     $phone = $str("phone", 30); $email = $str("email", 120);
     $email = $email === "" ? null : $email;
-    if ($name === "" || $contact === "" || $city === "" || $phone === "") fail("Company, contact, city and phone are required");
+    $street = $street === "" ? null : $street;
+    if ($name === "" || $contact === "" || $brgy === "" || $city === "" || $prov === "" || $phone === "") fail("Company, contact, barangay, city, province and phone are required");
     if (!valid_ph_phone($phone)) fail("Enter a valid Philippine mobile number (09XXXXXXXXX)");
     if ($email !== null && !valid_email($email)) fail("Enter a valid email address");
-    if ($id) run("UPDATE suppliers SET company_name=?, contact_person=?, phone=?, email=?, address=? WHERE supplier_id=?",
-                 "sssssi", [$name, $contact, $phone, $email, $city, $id]);
-    else     run("INSERT INTO suppliers (company_name, contact_person, phone, email, address) VALUES (?, ?, ?, ?, ?)",
-                 "sssss", [$name, $contact, $phone, $email, $city]);
+    if ($id) run("UPDATE suppliers SET company_name=?, contact_person=?, phone=?, email=?, street=?, barangay=?, city=?, province=? WHERE supplier_id=?",
+                 "ssssssssi", [$name, $contact, $phone, $email, $street, $brgy, $city, $prov, $id]);
+    else     run("INSERT INTO suppliers (company_name, contact_person, phone, email, street, barangay, city, province) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                 "ssssssss", [$name, $contact, $phone, $email, $street, $brgy, $city, $prov]);
+    out(["ok" => true]);
+
+/* ====================== CUSTOMERS ====================== */
+case "save_customer":
+    need("customers");
+    $id = (int)($in["id"] ?? 0);
+    $name = $str("name", 120); $phone = $str("phone", 30); $street = $str("street", 120);
+    $brgy = $str("brgy", 80); $city = $str("city", 80); $prov = $str("prov", 80);
+    $street = $street === "" ? null : $street;
+    if ($name === "" || $phone === "" || $brgy === "" || $city === "" || $prov === "") fail("Name, phone, barangay, city and province are required");
+    if (!valid_ph_phone($phone)) fail("Enter a valid Philippine mobile number (09XXXXXXXXX)");
+    if ($id) {
+        if (!rows("SELECT 1 FROM customers WHERE customer_id = ?", "i", [$id])) fail("Customer not found", 404);
+        run("UPDATE customers SET customer_name=?, phone=?, street=?, barangay=?, city=?, province=? WHERE customer_id=?",
+            "ssssssi", [$name, $phone, $street, $brgy, $city, $prov, $id]);
+    } else {
+        run("INSERT INTO customers (customer_name, phone, street, barangay, city, province) VALUES (?, ?, ?, ?, ?, ?)",
+            "ssssss", [$name, $phone, $street, $brgy, $city, $prov]);
+    }
     out(["ok" => true]);
 
 /* ====================== CUSTOMERS ====================== */
@@ -471,14 +508,7 @@ case "adjust_stock":
 /* ====================== SALES ====================== */
 case "add_sale":
     $u = need("sell");
-    $cid = (int)($in["cid"] ?? 0);
-    $cust = "Walk-in";
-    if ($cid) {
-        $c = rows("SELECT customer_name, archived_at FROM customers WHERE customer_id = ?", "i", [$cid])[0] ?? null;
-        if (!$c) fail("Customer not found", 404);
-        if ($c["archived_at"] !== null) fail("This customer is archived. Restore it first", 409);
-        $cust = $c["customer_name"]; // saved on the receipt as a historical snapshot
-    }
+    $cust = $str("cust", 120) ?: "Walk-in";
     $pid = (int)($in["pid"] ?? 0);
     $qty = (int)($in["qty"] ?? 0);
     $pay = $str("pay", 20);
@@ -491,8 +521,8 @@ case "add_sale":
     if ($qty > (int)$p["stock_quantity"]) fail("Only " . $p["stock_quantity"] . " in stock", 422);
     $n = (int)rows("SELECT COALESCE(MAX(CAST(SUBSTRING(receipt_number, 3) AS UNSIGNED)), 1000) + 1 AS n FROM sales")[0]["n"];
     $receipt = "S-" . $n;
-    run("INSERT INTO sales (receipt_number, user_id, customer_id, customer_name, payment_method, total_amount) VALUES (?, ?, ?, ?, ?, 0)",
-        "siiss", [$receipt, $u["id"], $cid ?: null, $cust, $pay]);
+    run("INSERT INTO sales (receipt_number, user_id, customer_name, payment_method, total_amount) VALUES (?, ?, ?, ?, 0)",
+        "siss", [$receipt, $u["id"], $cust, $pay]);
     $saleId = $conn->insert_id;
     run("INSERT INTO sale_items (sale_id, product_id, quantity, unit_price) VALUES (?, ?, ?, ?)",
         "iiid", [$saleId, $pid, $qty, $p["unit_price"]]);

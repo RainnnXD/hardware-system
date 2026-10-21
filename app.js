@@ -64,11 +64,6 @@ const db = {
   logs: [],
   set: { store: "Stock Keeper", tax: 12, reorder: 20, footer: "" },
 };
-/* Address is stored in separate columns: street (optional), barangay, city, province */
-const addr = (x) =>
-  [x.street, x.brgy && "Brgy. " + x.brgy, x.city, x.prov]
-    .filter(Boolean)
-    .join(", ");
 const P = (id) => db.prod.find((p) => p.id === id) || {};
 const total = (s) => s.items.reduce((a, i) => a + i.qty * i.price, 0);
 const nm = (l, id) => (db[l].find((x) => x.id === id) || { name: "—" }).name;
@@ -224,12 +219,8 @@ function openForm(title, fs, vals, save) {
   const touched = new Set();
   /* returns true when the field is INVALID, and paints/clears the red state */
   const check = (f, d) => {
-    const el = fm.elements[f.n],
-      x = d[f.n],
-      empty = x === "" || Number.isNaN(x),
-      bad =
-        f.t == "number" &&
-        el.validity.badInput; /* e.g. "abc" typed into a number box */
+    const x = d[f.n],
+      empty = x === "" || Number.isNaN(x);
     let m = "";
     if (bad) m = "Enter a valid number";
     else if (empty && !f.opt) m = "This field is required";
@@ -293,26 +284,6 @@ function openForm(title, fs, vals, save) {
 }
 
 /* ============ CRUD: products, categories, suppliers ============ */
-function nextSku(cid) {
-  const cat = db.cats.find((c) => c.id === cid);
-  if (!cat) return "";
-  const same = db.prod.find((p) => p.cat === cid && p.sku.includes("-"));
-  let pre;
-  if (same) pre = same.sku.split("-")[0];
-  else {
-    const w = cat.name.split(/[^A-Za-z]+/).filter(Boolean);
-    pre = (
-      w.length > 1 ? w[0][0] + w[1][0] : (w[0] || "XX").slice(0, 2)
-    ).toUpperCase();
-  }
-  const top = Math.max(
-    cid * 1000,
-    ...db.prod
-      .filter((p) => p.sku.startsWith(pre + "-"))
-      .map((p) => parseInt(p.sku.split("-")[1], 10) || 0),
-  );
-  return pre + "-" + (top + 1);
-}
 const S = {
   prod: {
     k: "prod",
@@ -373,34 +344,9 @@ const S = {
     f: () => [
       { n: "name", l: "Company", ph: "e.g. Calamba Cement & Masonry Depot" },
       { n: "contact", l: "Contact person", ph: "e.g. Juan Dela Cruz" },
-      {
-        n: "street",
-        l: "Street / building (optional)",
-        ph: "e.g. National Highway",
-        opt: 1,
-      },
-      { n: "brgy", l: "Barangay", ph: "e.g. Real" },
-      { n: "city", l: "City", ph: "e.g. Calamba City" },
-      { n: "prov", l: "Province", ph: "e.g. Laguna" },
+      { n: "city", l: "City / Province", ph: "e.g. Calamba City, Laguna" },
       { n: "phone", l: "Phone", t: "tel", ph: "09XXXXXXXXX" },
       { n: "email", l: "Email", t: "email", ph: "name@company.com" },
-    ],
-  },
-  cust: {
-    k: "cust",
-    t: "Customer",
-    f: () => [
-      { n: "name", l: "Customer name", ph: "e.g. Engr. Ramon Villanueva" },
-      { n: "phone", l: "Mobile number", t: "tel", ph: "09XXXXXXXXX" },
-      {
-        n: "street",
-        l: "Street / building (optional)",
-        ph: "e.g. National Highway",
-        opt: 1,
-      },
-      { n: "brgy", l: "Barangay", ph: "e.g. Halang" },
-      { n: "city", l: "City", ph: "e.g. Calamba City" },
-      { n: "prov", l: "Province", ph: "e.g. Laguna" },
     ],
   },
 };
@@ -423,12 +369,6 @@ function edit(s, id) {
         ? { min: db.set.reorder, sku: nextSku((db.cats[0] || {}).id) }
         : {};
   const fs = c.f();
-  // Only administrators and inventory staff may set stock quantities
-  if (s == "prod" && !can("stock"))
-    fs.splice(
-      fs.findIndex((f) => f.n == "stock"),
-      1,
-    );
   if (s == "emp" && !id)
     fs.push({
       n: "pw",
@@ -442,12 +382,7 @@ function edit(s, id) {
     if (!j) return;
     await load();
     show(cur);
-    toast(
-      c.t +
-        (id ? " updated: " : " added: ") +
-        d.name +
-        (j.sku && !id ? " (SKU " + j.sku + ")" : ""),
-    );
+    toast(c.t + (id ? " updated: " : " added: ") + d.name);
   });
   if (s == "prod" && !id)
     dlg.querySelector('[name="cat"]').onchange = (ev) =>
@@ -667,109 +602,10 @@ function rSup() {
         (s) => actv("prod").filter((p) => p.sup === s.id).length,
         "m",
       ],
-      ["Added / updated", dts],
-      [
-        "",
-        (s) =>
-          `<button class="b s" data-a="supd" data-id="${s.id}">Details</button> ` +
-          acts("sup", s.id),
-        "act",
-      ],
+      ["", (s) => acts("sup", s.id), "act"],
     ],
     db.sup.filter(arf("#sa")),
     archEmpty("#sa", "suppliers") || "No suppliers yet.",
-    archRow,
-  );
-}
-function supInfo(id) {
-  const s = db.sup.find((x) => x.id === id),
-    box = $("#supdet");
-  if (!s || !box) return;
-  const ps = db.prod.filter((p) => p.sup === id),
-    h = db.mov
-      .filter(
-        (m) =>
-          m.type == "IN" &&
-          !m.adj &&
-          m.note !== "Opening stock" &&
-          P(m.pid).sup === id,
-      )
-      .slice()
-      .reverse(),
-    qty = h.reduce((a, m) => a + m.qty, 0);
-  box.innerHTML = `<h3>${e(s.name)}</h3>
-<div class="tw"><table><tbody>${[
-    ["Contact person", e(s.contact)],
-    ["Phone", e(s.phone)],
-    ["Email", e(s.email || "—")],
-    ["Address", e(addr(s) || "—")],
-    [
-      "Products supplied",
-      ps.length ? ps.map((p) => e(p.name)).join(", ") : "—",
-    ],
-  ]
-    .map((r) => `<tr><td><b>${r[0]}</b></td><td>${r[1]}</td></tr>`)
-    .join("")}</tbody></table></div>
-<h3 class="sh">Supplier history</h3>
-<p class="mu">${h.length ? `${h.length} deliver${h.length > 1 ? "ies" : "y"} · ${qty} units received · last on ${h[0].date}` : "No deliveries recorded yet."}</p>
-${
-  h.length
-    ? `<div class="tw hist"><table><thead><tr><th>Date</th><th>Product</th><th>Qty</th><th>Reference</th><th>Received by</th></tr></thead><tbody>${h
-        .map(
-          (m) =>
-            `<tr><td class="m">${m.date}</td><td>${e(P(m.pid).name || "—")}</td><td class="m">+${m.qty}</td><td>${e(m.note)}</td><td>${e(m.by || "—")}</td></tr>`,
-        )
-        .join("")}</tbody></table></div>`
-    : ""
-}
-<div class="ft"><button class="b" data-a="supx">Close</button></div>`;
-  box.classList.remove("hide");
-  box.scrollIntoView({ behavior: "smooth", block: "nearest" });
-}
-function rCust() {
-  const q = $("#cq").value.toLowerCase(),
-    mine = (c) => db.sales.filter((s) => s.cid === c.id);
-  tbl(
-    "#cutbl",
-    [
-      [
-        "Customer",
-        (c) =>
-          `<div class="pn"><span class="ch" data-st="--c:${cc(c.id)}"><span class="ms">person</span></span><b>${e(c.name)}</b>${archTag(c)}</div>`,
-      ],
-      ["Mobile", (c) => e(c.phone || "—"), "m"],
-      ["Barangay", (c) => e(c.brgy)],
-      ["City", (c) => e(c.city)],
-      ["Province", (c) => e(c.prov)],
-      ["Sales", (c) => mine(c).length, "m"],
-      [
-        "Total purchases",
-        (c) => money(mine(c).reduce((a, s) => a + total(s), 0)),
-        "m",
-      ],
-      ["Added / updated", dts],
-      [
-        "",
-        (c) =>
-          c.arch
-            ? can("archive")
-              ? `<button class="b s" data-a="restore" data-s="cust" data-id="${c.id}">Restore</button>`
-              : ""
-            : (can("customers")
-                ? `<button class="b s" data-a="edit" data-s="cust" data-id="${c.id}">Edit</button>`
-                : "") +
-              (can("archive")
-                ? ` <button class="b s" data-a="arch" data-s="cust" data-id="${c.id}">Archive</button>`
-                : ""),
-        "act",
-      ],
-    ],
-    db.cust.filter(
-      (c) =>
-        arf("#cua")(c) && (c.name + " " + addr(c)).toLowerCase().includes(q),
-    ),
-    archEmpty("#cua", "customers") ||
-      "No customers match your search. Add a customer to start selling.",
     archRow,
   );
 }
@@ -908,22 +744,10 @@ function mvForm(type) {
 
 /* ============ SALES ============ */
 function newSale() {
-  if (!actv("cust").length)
-    return toast(
-      "Add a customer first (Customers page). Every sale needs a customer.",
-      "bad",
-    );
   openForm(
     "New sale",
     [
-      {
-        n: "cid",
-        l: "Customer",
-        t: "select",
-        num: 1,
-        ph: "Select a customer",
-        o: actv("cust").map((c) => [c.id, `${c.name} – ${c.city}`]),
-      },
+      { n: "cust", l: "Customer", ph: "e.g. Walk-in or customer name" },
       {
         n: "pid",
         l: "Product",
@@ -1150,9 +974,7 @@ function signUp() {
         l: "Role",
         t: "select",
         ph: "Select a role",
-        o: Object.entries(ROLE).filter(
-          (r) => !["admin", "manager"].includes(r[0]),
-        ),
+        o: Object.entries(ROLE).filter((r) => r[0] != "admin"),
       },
       {
         n: "pw",
@@ -1222,15 +1044,6 @@ function rEmp() {
     "No employees match your filter.",
     (u) => (u.status == "Inactive" ? "arch" : ""),
   );
-  $("#roles").innerHTML =
-    `<h3>Role responsibilities</h3><div class="tw"><table><thead><tr><th>Role</th><th>Responsible for</th><th>Not allowed</th></tr></thead><tbody>${Object.keys(
-      ROLE,
-    )
-      .map(
-        (r) =>
-          `<tr><td><b>${ROLE[r]}</b></td><td>${e(DUTY[r][0])}</td><td>${e(DUTY[r][1])}</td></tr>`,
-      )
-      .join("")}</tbody></table></div>`;
 }
 function rLogs() {
   const q = $("#lq").value.toLowerCase();
@@ -1508,45 +1321,6 @@ document.addEventListener("click", (ev) => {
     $$(".pop").forEach((p) => p.classList.add("hide"));
 });
 ["#eq", "#lq"].forEach((s) => ($(s).oninput = () => show(cur)));
-/* ---- login form: real-time validation (same behaviour as openForm) ---- */
-const LOGIN_MSG = {
-  lu: "Enter your username or email",
-  lp: "Enter your password",
-};
-const loginTouched = new Set();
-function paintLogin(input, msg) {
-  const lb = input.closest("label");
-  lb.classList.toggle("e", !!msg);
-  lb.querySelector(".er").textContent = msg;
-  if (msg) input.setAttribute("aria-invalid", "true");
-  else input.removeAttribute("aria-invalid");
-  return !!msg;
-}
-/* returns true when INVALID */
-function checkLogin(input) {
-  const empty =
-    input.id == "lp" ? input.value === "" : input.value.trim() === "";
-  return paintLogin(input, empty ? LOGIN_MSG[input.id] : "");
-}
-let loginPointer = false; /* a click on a button must not be displaced by a blur-triggered error */
-$("#lf").addEventListener("pointerdown", (ev) => {
-  loginPointer = !!ev.target.closest("button:not(.pwt)");
-});
-$("#lf").addEventListener("input", (ev) => {
-  if (!LOGIN_MSG[ev.target.id]) return;
-  loginTouched.add(ev.target.id);
-  delete ev.target.closest("label").dataset.srv;
-  checkLogin(
-    ev.target,
-  ); /* also replaces any "incorrect password" message once the user edits */
-});
-$("#lf").addEventListener("focusout", (ev) => {
-  if (!LOGIN_MSG[ev.target.id] || loginPointer) return;
-  loginTouched.add(ev.target.id);
-  /* keep the server's "incorrect password" message while the box is empty after a failed attempt */
-  if (ev.target.closest("label").dataset.srv) return;
-  checkLogin(ev.target);
-});
 /* LOGIN PASSWORD CHECKED AGAINST THE HASH*/
 function buildLogin() {
   $("#lu").value = "";
@@ -1691,8 +1465,7 @@ document.addEventListener("click", (ev) => {
     signup: signUp,
     po: () => toast("Purchase orders are not enabled for this store yet"),
     sale: () => saleInfo(d.id),
-    supd: () => supInfo(+d.id),
-    supx: () => $("#supdet").classList.add("hide"),
+    exp: () => toast("Preparing " + d.t + " export"),
     adj: () => (can("stock") ? adjust(+d.id) : deny()),
     set: () => (ADM() ? setForm() : deny()),
     read: () => {
@@ -1707,8 +1480,8 @@ document.addEventListener("click", (ev) => {
     mypw: changeMyPw,
   })[d.a]();
 });
-["#pq", "#sq", "#cq"].forEach((s) => ($(s).oninput = () => show(cur)));
-["#pc", "#mf", "#pa", "#ca", "#sa", "#cua", "#ea"].forEach(
+["#pq", "#sq"].forEach((s) => ($(s).oninput = () => show(cur)));
+["#pc", "#mf", "#pa", "#ca", "#sa", "#ea"].forEach(
   (s) => ($(s).onchange = () => show(cur)),
 );
 $("#menu").onclick = () => document.body.classList.toggle("nav-open");
