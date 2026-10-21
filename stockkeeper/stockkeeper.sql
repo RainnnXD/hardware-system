@@ -14,6 +14,10 @@
 --   Ledger tables (inventory_movements, sales, sale_items, activity_logs) are never edited: their own
 --   movement_date / sale_date / date_created column is the creation date.
 --   Any NEW editable table (e.g. customers) must include created_at and updated_at the same way.
+-- RECEIPT RULE: sale_items.product_name stores the product name at the time of sale, so renaming a product never changes old receipts.
+-- HISTORY RULE: every edit, archive and restore of a business record is copied (old and new values) into record_history
+--   by the triggers below, so the previous version of any record can always be looked up later.
+--   Ledger tables (inventory_movements, sale_items, activity_logs, record_history) also refuse UPDATE.
 -- GENERAL SYSTEM RULE: records are archived, never permanently deleted.
 --   Archivable records (products, categories, suppliers, customers) carry archived_at: NULL = active, a date = archived.
 --   Restoring sets archived_at back to NULL. Employees are switched Active/Inactive instead.
@@ -24,6 +28,9 @@
 --     ADD updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
 --   (same for suppliers, products and settings; for users only: ADD updated_at TIMESTAMP NOT NULL
 --    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;)
+--   For settings (already has updated_at), add the creation date and back-fill it without touching updated_at:
+--     ALTER TABLE settings ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER receipt_footer;
+--     UPDATE settings SET created_at = updated_at, updated_at = updated_at WHERE setting_id = 1;
 --   For the customers feature on an existing database, run the CREATE TABLE customers block and the
 --   trg_no_delete_customers trigger below, then:
 --     ALTER TABLE sales ADD COLUMN customer_id INT UNSIGNED NULL AFTER user_id,
@@ -35,7 +42,7 @@ CREATE DATABASE IF NOT EXISTS stockkeeper_db CHARACTER SET utf8mb4 COLLATE utf8m
 USE stockkeeper_db;
 
 SET FOREIGN_KEY_CHECKS = 0;
-DROP TABLE IF EXISTS settings, activity_logs, sale_items, sales, inventory_movements,
+DROP TABLE IF EXISTS record_history, settings, activity_logs, sale_items, sales, inventory_movements,
                      products, customers, suppliers, categories, users, roles;
 SET FOREIGN_KEY_CHECKS = 1;
 
@@ -192,6 +199,7 @@ CREATE TABLE sale_items (
   sale_item_id  BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   sale_id       INT UNSIGNED    NOT NULL,
   product_id    INT UNSIGNED    NOT NULL,
+  product_name  VARCHAR(150)    NOT NULL DEFAULT '',      -- name at the time of sale (filled by trigger), so renaming a product never changes old receipts
   quantity      INT             NOT NULL,
   unit_price    DECIMAL(10,2)   NOT NULL,              -- price charged at the time of sale (a historical fact about this line)
   subtotal      DECIMAL(12,2)   GENERATED ALWAYS AS (quantity * unit_price) STORED,
@@ -228,10 +236,28 @@ CREATE TABLE settings (
   tax_rate        DECIMAL(5,2)     NOT NULL DEFAULT 12.00,
   reorder_level   INT              NOT NULL DEFAULT 20,
   receipt_footer  VARCHAR(255)     NULL,
-  updated_at      DATETIME         NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  created_at      DATETIME         NOT NULL DEFAULT CURRENT_TIMESTAMP,  -- set once when the settings row is created
+  updated_at      DATETIME         NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,  -- refreshed automatically on every change
   CONSTRAINT pk_settings PRIMARY KEY (setting_id),
   CONSTRAINT chk_settings_single CHECK (setting_id = 1),
   CONSTRAINT chk_settings_tax CHECK (tax_rate >= 0 AND tax_rate <= 100)
+) ENGINE=InnoDB;
+
+-- RECORD HISTORY: append-only trail of every edit, archive and restore (old and new values), kept for future retrieval
+CREATE TABLE record_history (
+  history_id   BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  table_name   VARCHAR(30)     NOT NULL,                 -- products, categories, suppliers, customers, users, settings
+  record_id    INT UNSIGNED    NOT NULL,                 -- primary key of the changed record
+  change_type  ENUM('UPDATE','ARCHIVE','RESTORE') NOT NULL,
+  old_values   JSON            NOT NULL,                 -- the record before the change (passwords are never copied)
+  new_values   JSON            NOT NULL,                 -- the record after the change
+  changed_by   INT UNSIGNED    NULL,                     -- employee who made the change (set by api.php)
+  changed_at   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT pk_record_history PRIMARY KEY (history_id),
+  CONSTRAINT fk_history_user FOREIGN KEY (changed_by) REFERENCES users (user_id)
+    ON UPDATE CASCADE ON DELETE RESTRICT,
+  KEY idx_history_record (table_name, record_id),
+  KEY idx_history_date (changed_at)
 ) ENGINE=InnoDB;
 
 -- =============================================================================
@@ -254,6 +280,84 @@ CREATE TRIGGER trg_no_delete_sale_items BEFORE DELETE ON sale_items FOR EACH ROW
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Records are never permanently deleted. Archive the record instead.';
 CREATE TRIGGER trg_no_delete_inventory_movements BEFORE DELETE ON inventory_movements FOR EACH ROW
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Records are never permanently deleted. Archive the record instead.';
+CREATE TRIGGER trg_no_delete_activity_logs BEFORE DELETE ON activity_logs FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Records are never permanently deleted. Archive the record instead.';
+CREATE TRIGGER trg_no_delete_settings BEFORE DELETE ON settings FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Records are never permanently deleted. Archive the record instead.';
+CREATE TRIGGER trg_no_delete_record_history BEFORE DELETE ON record_history FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Records are never permanently deleted. Archive the record instead.';
+CREATE TRIGGER trg_no_update_inventory_movements BEFORE UPDATE ON inventory_movements FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Historical records cannot be edited.';
+CREATE TRIGGER trg_no_update_sale_items BEFORE UPDATE ON sale_items FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Historical records cannot be edited.';
+CREATE TRIGGER trg_no_update_activity_logs BEFORE UPDATE ON activity_logs FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Historical records cannot be edited.';
+CREATE TRIGGER trg_no_update_record_history BEFORE UPDATE ON record_history FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Historical records cannot be edited.';
+
+-- SALE ITEM NAME SNAPSHOT (every new sale line stores the product name as it was when sold)
+CREATE TRIGGER trg_sale_items_name BEFORE INSERT ON sale_items FOR EACH ROW
+  SET NEW.product_name = COALESCE(NULLIF(NEW.product_name, ''), (SELECT p.product_name FROM products p WHERE p.product_id = NEW.product_id), '');
+
+-- HISTORY TRIGGERS (copy old and new values into record_history on every real change)
+CREATE TRIGGER trg_hist_products AFTER UPDATE ON products FOR EACH ROW
+  INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)
+  SELECT 'products', OLD.product_id,
+    CASE WHEN OLD.archived_at IS NULL AND NEW.archived_at IS NOT NULL THEN 'ARCHIVE'
+         WHEN OLD.archived_at IS NOT NULL AND NEW.archived_at IS NULL THEN 'RESTORE' ELSE 'UPDATE' END,
+    JSON_OBJECT('sku', OLD.sku, 'product_name', OLD.product_name, 'category_id', OLD.category_id, 'supplier_id', OLD.supplier_id, 'unit_price', OLD.unit_price, 'reorder_level', OLD.reorder_level, 'unit', OLD.unit, 'archived_at', OLD.archived_at),
+    JSON_OBJECT('sku', NEW.sku, 'product_name', NEW.product_name, 'category_id', NEW.category_id, 'supplier_id', NEW.supplier_id, 'unit_price', NEW.unit_price, 'reorder_level', NEW.reorder_level, 'unit', NEW.unit, 'archived_at', NEW.archived_at),
+    @app_user_id
+  FROM DUAL
+  WHERE NOT (OLD.sku <=> NEW.sku AND OLD.product_name <=> NEW.product_name AND OLD.category_id <=> NEW.category_id AND OLD.supplier_id <=> NEW.supplier_id AND OLD.unit_price <=> NEW.unit_price AND OLD.reorder_level <=> NEW.reorder_level AND OLD.unit <=> NEW.unit AND OLD.archived_at <=> NEW.archived_at);
+CREATE TRIGGER trg_hist_categories AFTER UPDATE ON categories FOR EACH ROW
+  INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)
+  SELECT 'categories', OLD.category_id,
+    CASE WHEN OLD.archived_at IS NULL AND NEW.archived_at IS NOT NULL THEN 'ARCHIVE'
+         WHEN OLD.archived_at IS NOT NULL AND NEW.archived_at IS NULL THEN 'RESTORE' ELSE 'UPDATE' END,
+    JSON_OBJECT('category_name', OLD.category_name, 'description', OLD.description, 'archived_at', OLD.archived_at),
+    JSON_OBJECT('category_name', NEW.category_name, 'description', NEW.description, 'archived_at', NEW.archived_at),
+    @app_user_id
+  FROM DUAL
+  WHERE NOT (OLD.category_name <=> NEW.category_name AND OLD.description <=> NEW.description AND OLD.archived_at <=> NEW.archived_at);
+CREATE TRIGGER trg_hist_suppliers AFTER UPDATE ON suppliers FOR EACH ROW
+  INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)
+  SELECT 'suppliers', OLD.supplier_id,
+    CASE WHEN OLD.archived_at IS NULL AND NEW.archived_at IS NOT NULL THEN 'ARCHIVE'
+         WHEN OLD.archived_at IS NOT NULL AND NEW.archived_at IS NULL THEN 'RESTORE' ELSE 'UPDATE' END,
+    JSON_OBJECT('company_name', OLD.company_name, 'contact_person', OLD.contact_person, 'phone', OLD.phone, 'email', OLD.email, 'address', OLD.address, 'archived_at', OLD.archived_at),
+    JSON_OBJECT('company_name', NEW.company_name, 'contact_person', NEW.contact_person, 'phone', NEW.phone, 'email', NEW.email, 'address', NEW.address, 'archived_at', NEW.archived_at),
+    @app_user_id
+  FROM DUAL
+  WHERE NOT (OLD.company_name <=> NEW.company_name AND OLD.contact_person <=> NEW.contact_person AND OLD.phone <=> NEW.phone AND OLD.email <=> NEW.email AND OLD.address <=> NEW.address AND OLD.archived_at <=> NEW.archived_at);
+CREATE TRIGGER trg_hist_customers AFTER UPDATE ON customers FOR EACH ROW
+  INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)
+  SELECT 'customers', OLD.customer_id,
+    CASE WHEN OLD.archived_at IS NULL AND NEW.archived_at IS NOT NULL THEN 'ARCHIVE'
+         WHEN OLD.archived_at IS NOT NULL AND NEW.archived_at IS NULL THEN 'RESTORE' ELSE 'UPDATE' END,
+    JSON_OBJECT('customer_name', OLD.customer_name, 'phone', OLD.phone, 'street', OLD.street, 'barangay', OLD.barangay, 'city', OLD.city, 'province', OLD.province, 'archived_at', OLD.archived_at),
+    JSON_OBJECT('customer_name', NEW.customer_name, 'phone', NEW.phone, 'street', NEW.street, 'barangay', NEW.barangay, 'city', NEW.city, 'province', NEW.province, 'archived_at', NEW.archived_at),
+    @app_user_id
+  FROM DUAL
+  WHERE NOT (OLD.customer_name <=> NEW.customer_name AND OLD.phone <=> NEW.phone AND OLD.street <=> NEW.street AND OLD.barangay <=> NEW.barangay AND OLD.city <=> NEW.city AND OLD.province <=> NEW.province AND OLD.archived_at <=> NEW.archived_at);
+CREATE TRIGGER trg_hist_users AFTER UPDATE ON users FOR EACH ROW
+  INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)
+  SELECT 'users', OLD.user_id,
+    'UPDATE',
+    JSON_OBJECT('full_name', OLD.full_name, 'username', OLD.username, 'email', OLD.email, 'role_id', OLD.role_id, 'job_title', OLD.job_title, 'phone', OLD.phone, 'status', OLD.status),
+    JSON_OBJECT('full_name', NEW.full_name, 'username', NEW.username, 'email', NEW.email, 'role_id', NEW.role_id, 'job_title', NEW.job_title, 'phone', NEW.phone, 'status', NEW.status),
+    @app_user_id
+  FROM DUAL
+  WHERE NOT (OLD.full_name <=> NEW.full_name AND OLD.username <=> NEW.username AND OLD.email <=> NEW.email AND OLD.role_id <=> NEW.role_id AND OLD.job_title <=> NEW.job_title AND OLD.phone <=> NEW.phone AND OLD.status <=> NEW.status);
+CREATE TRIGGER trg_hist_settings AFTER UPDATE ON settings FOR EACH ROW
+  INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)
+  SELECT 'settings', OLD.setting_id,
+    'UPDATE',
+    JSON_OBJECT('store_name', OLD.store_name, 'tax_rate', OLD.tax_rate, 'reorder_level', OLD.reorder_level, 'receipt_footer', OLD.receipt_footer),
+    JSON_OBJECT('store_name', NEW.store_name, 'tax_rate', NEW.tax_rate, 'reorder_level', NEW.reorder_level, 'receipt_footer', NEW.receipt_footer),
+    @app_user_id
+  FROM DUAL
+  WHERE NOT (OLD.store_name <=> NEW.store_name AND OLD.tax_rate <=> NEW.tax_rate AND OLD.reorder_level <=> NEW.reorder_level AND OLD.receipt_footer <=> NEW.receipt_footer);
 
 -- =============================================================================
 -- Stock Keeper · Seed data (Filipino business records)
@@ -358,13 +462,6 @@ INSERT INTO sale_items (sale_id, product_id, quantity, unit_price) VALUES
 
 -- sales.total_amount is derived from the line items (subtotal is a generated column)
 UPDATE sales s SET s.total_amount = (SELECT SUM(si.subtotal) FROM sale_items si WHERE si.sale_id = s.sale_id);
--- Track creation and update dates
-ALTER TABLE users      ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at;
-ALTER TABLE categories ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
-ALTER TABLE suppliers  ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
-ALTER TABLE products   ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
-ALTER TABLE settings   ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
-
 -- Keep historical records: block hard deletes at the database level
 ALTER TABLE inventory_movements DROP FOREIGN KEY fk_movements_product,
   ADD CONSTRAINT fk_movements_product FOREIGN KEY (product_id) REFERENCES products (product_id) ON UPDATE CASCADE ON DELETE RESTRICT;
@@ -394,3 +491,118 @@ INSERT INTO activity_logs (user_id, action, description, date_created) VALUES
 
 INSERT INTO settings (setting_id, store_name, tax_rate, reorder_level, receipt_footer) VALUES
  (1,'Stock Keeper',12.00,20,'Thank you for your purchase.');
+
+-- =============================================================================
+-- RECORD HISTORY (safe to run again): creates the history table and triggers only if they
+-- are missing. For a database that already has data, run just this part, not the whole file
+-- (the top of this file erases existing data).
+-- =============================================================================
+-- RECORD HISTORY: append-only trail of every edit, archive and restore (old and new values), kept for future retrieval
+CREATE TABLE IF NOT EXISTS record_history (
+  history_id   BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  table_name   VARCHAR(30)     NOT NULL,                 -- products, categories, suppliers, customers, users, settings
+  record_id    INT UNSIGNED    NOT NULL,                 -- primary key of the changed record
+  change_type  ENUM('UPDATE','ARCHIVE','RESTORE') NOT NULL,
+  old_values   JSON            NOT NULL,                 -- the record before the change (passwords are never copied)
+  new_values   JSON            NOT NULL,                 -- the record after the change
+  changed_by   INT UNSIGNED    NULL,                     -- employee who made the change (set by api.php)
+  changed_at   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT pk_record_history PRIMARY KEY (history_id),
+  CONSTRAINT fk_history_user FOREIGN KEY (changed_by) REFERENCES users (user_id)
+    ON UPDATE CASCADE ON DELETE RESTRICT,
+  KEY idx_history_record (table_name, record_id),
+  KEY idx_history_date (changed_at)
+) ENGINE=InnoDB;
+
+DROP TRIGGER IF EXISTS trg_no_delete_record_history;
+CREATE TRIGGER trg_no_delete_record_history BEFORE DELETE ON record_history FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Records are never permanently deleted. Archive the record instead.';
+DROP TRIGGER IF EXISTS trg_no_update_inventory_movements;
+CREATE TRIGGER trg_no_update_inventory_movements BEFORE UPDATE ON inventory_movements FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Historical records cannot be edited.';
+DROP TRIGGER IF EXISTS trg_no_update_sale_items;
+CREATE TRIGGER trg_no_update_sale_items BEFORE UPDATE ON sale_items FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Historical records cannot be edited.';
+DROP TRIGGER IF EXISTS trg_no_update_activity_logs;
+CREATE TRIGGER trg_no_update_activity_logs BEFORE UPDATE ON activity_logs FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Historical records cannot be edited.';
+DROP TRIGGER IF EXISTS trg_no_update_record_history;
+CREATE TRIGGER trg_no_update_record_history BEFORE UPDATE ON record_history FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Historical records cannot be edited.';
+
+DROP TRIGGER IF EXISTS trg_hist_products;
+CREATE TRIGGER trg_hist_products AFTER UPDATE ON products FOR EACH ROW
+  INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)
+  SELECT 'products', OLD.product_id,
+    CASE WHEN OLD.archived_at IS NULL AND NEW.archived_at IS NOT NULL THEN 'ARCHIVE'
+         WHEN OLD.archived_at IS NOT NULL AND NEW.archived_at IS NULL THEN 'RESTORE' ELSE 'UPDATE' END,
+    JSON_OBJECT('sku', OLD.sku, 'product_name', OLD.product_name, 'category_id', OLD.category_id, 'supplier_id', OLD.supplier_id, 'unit_price', OLD.unit_price, 'reorder_level', OLD.reorder_level, 'unit', OLD.unit, 'archived_at', OLD.archived_at),
+    JSON_OBJECT('sku', NEW.sku, 'product_name', NEW.product_name, 'category_id', NEW.category_id, 'supplier_id', NEW.supplier_id, 'unit_price', NEW.unit_price, 'reorder_level', NEW.reorder_level, 'unit', NEW.unit, 'archived_at', NEW.archived_at),
+    @app_user_id
+  FROM DUAL
+  WHERE NOT (OLD.sku <=> NEW.sku AND OLD.product_name <=> NEW.product_name AND OLD.category_id <=> NEW.category_id AND OLD.supplier_id <=> NEW.supplier_id AND OLD.unit_price <=> NEW.unit_price AND OLD.reorder_level <=> NEW.reorder_level AND OLD.unit <=> NEW.unit AND OLD.archived_at <=> NEW.archived_at);
+DROP TRIGGER IF EXISTS trg_hist_categories;
+CREATE TRIGGER trg_hist_categories AFTER UPDATE ON categories FOR EACH ROW
+  INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)
+  SELECT 'categories', OLD.category_id,
+    CASE WHEN OLD.archived_at IS NULL AND NEW.archived_at IS NOT NULL THEN 'ARCHIVE'
+         WHEN OLD.archived_at IS NOT NULL AND NEW.archived_at IS NULL THEN 'RESTORE' ELSE 'UPDATE' END,
+    JSON_OBJECT('category_name', OLD.category_name, 'description', OLD.description, 'archived_at', OLD.archived_at),
+    JSON_OBJECT('category_name', NEW.category_name, 'description', NEW.description, 'archived_at', NEW.archived_at),
+    @app_user_id
+  FROM DUAL
+  WHERE NOT (OLD.category_name <=> NEW.category_name AND OLD.description <=> NEW.description AND OLD.archived_at <=> NEW.archived_at);
+DROP TRIGGER IF EXISTS trg_hist_suppliers;
+CREATE TRIGGER trg_hist_suppliers AFTER UPDATE ON suppliers FOR EACH ROW
+  INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)
+  SELECT 'suppliers', OLD.supplier_id,
+    CASE WHEN OLD.archived_at IS NULL AND NEW.archived_at IS NOT NULL THEN 'ARCHIVE'
+         WHEN OLD.archived_at IS NOT NULL AND NEW.archived_at IS NULL THEN 'RESTORE' ELSE 'UPDATE' END,
+    JSON_OBJECT('company_name', OLD.company_name, 'contact_person', OLD.contact_person, 'phone', OLD.phone, 'email', OLD.email, 'address', OLD.address, 'archived_at', OLD.archived_at),
+    JSON_OBJECT('company_name', NEW.company_name, 'contact_person', NEW.contact_person, 'phone', NEW.phone, 'email', NEW.email, 'address', NEW.address, 'archived_at', NEW.archived_at),
+    @app_user_id
+  FROM DUAL
+  WHERE NOT (OLD.company_name <=> NEW.company_name AND OLD.contact_person <=> NEW.contact_person AND OLD.phone <=> NEW.phone AND OLD.email <=> NEW.email AND OLD.address <=> NEW.address AND OLD.archived_at <=> NEW.archived_at);
+DROP TRIGGER IF EXISTS trg_hist_customers;
+CREATE TRIGGER trg_hist_customers AFTER UPDATE ON customers FOR EACH ROW
+  INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)
+  SELECT 'customers', OLD.customer_id,
+    CASE WHEN OLD.archived_at IS NULL AND NEW.archived_at IS NOT NULL THEN 'ARCHIVE'
+         WHEN OLD.archived_at IS NOT NULL AND NEW.archived_at IS NULL THEN 'RESTORE' ELSE 'UPDATE' END,
+    JSON_OBJECT('customer_name', OLD.customer_name, 'phone', OLD.phone, 'street', OLD.street, 'barangay', OLD.barangay, 'city', OLD.city, 'province', OLD.province, 'archived_at', OLD.archived_at),
+    JSON_OBJECT('customer_name', NEW.customer_name, 'phone', NEW.phone, 'street', NEW.street, 'barangay', NEW.barangay, 'city', NEW.city, 'province', NEW.province, 'archived_at', NEW.archived_at),
+    @app_user_id
+  FROM DUAL
+  WHERE NOT (OLD.customer_name <=> NEW.customer_name AND OLD.phone <=> NEW.phone AND OLD.street <=> NEW.street AND OLD.barangay <=> NEW.barangay AND OLD.city <=> NEW.city AND OLD.province <=> NEW.province AND OLD.archived_at <=> NEW.archived_at);
+DROP TRIGGER IF EXISTS trg_hist_users;
+CREATE TRIGGER trg_hist_users AFTER UPDATE ON users FOR EACH ROW
+  INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)
+  SELECT 'users', OLD.user_id,
+    'UPDATE',
+    JSON_OBJECT('full_name', OLD.full_name, 'username', OLD.username, 'email', OLD.email, 'role_id', OLD.role_id, 'job_title', OLD.job_title, 'phone', OLD.phone, 'status', OLD.status),
+    JSON_OBJECT('full_name', NEW.full_name, 'username', NEW.username, 'email', NEW.email, 'role_id', NEW.role_id, 'job_title', NEW.job_title, 'phone', NEW.phone, 'status', NEW.status),
+    @app_user_id
+  FROM DUAL
+  WHERE NOT (OLD.full_name <=> NEW.full_name AND OLD.username <=> NEW.username AND OLD.email <=> NEW.email AND OLD.role_id <=> NEW.role_id AND OLD.job_title <=> NEW.job_title AND OLD.phone <=> NEW.phone AND OLD.status <=> NEW.status);
+DROP TRIGGER IF EXISTS trg_hist_settings;
+CREATE TRIGGER trg_hist_settings AFTER UPDATE ON settings FOR EACH ROW
+  INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)
+  SELECT 'settings', OLD.setting_id,
+    'UPDATE',
+    JSON_OBJECT('store_name', OLD.store_name, 'tax_rate', OLD.tax_rate, 'reorder_level', OLD.reorder_level, 'receipt_footer', OLD.receipt_footer),
+    JSON_OBJECT('store_name', NEW.store_name, 'tax_rate', NEW.tax_rate, 'reorder_level', NEW.reorder_level, 'receipt_footer', NEW.receipt_footer),
+    @app_user_id
+  FROM DUAL
+  WHERE NOT (OLD.store_name <=> NEW.store_name AND OLD.tax_rate <=> NEW.tax_rate AND OLD.reorder_level <=> NEW.reorder_level AND OLD.receipt_footer <=> NEW.receipt_footer);
+
+-- =============================================================================
+-- ALREADY HAVE DATA? Receipts keep the product name as sold. Run once, in this order (remove the leading "-- "):
+-- =============================================================================
+-- ALTER TABLE sale_items ADD COLUMN product_name VARCHAR(150) NOT NULL DEFAULT '' AFTER product_id;
+-- DROP TRIGGER IF EXISTS trg_no_update_sale_items;
+-- UPDATE sale_items si JOIN products p ON p.product_id = si.product_id SET si.product_name = p.product_name WHERE si.product_name = '';
+-- CREATE TRIGGER trg_no_update_sale_items BEFORE UPDATE ON sale_items FOR EACH ROW
+--   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Historical records cannot be edited.';
+-- CREATE TRIGGER trg_sale_items_name BEFORE INSERT ON sale_items FOR EACH ROW
+--   SET NEW.product_name = COALESCE(NULLIF(NEW.product_name, ''), (SELECT p.product_name FROM products p WHERE p.product_id = NEW.product_id), '');
+-- (Existing lines are filled with the product's CURRENT name; names from before a rename cannot be recovered.)

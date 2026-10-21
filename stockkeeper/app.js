@@ -468,7 +468,9 @@ function archive(s, id) {
   const note =
     s == "prod"
       ? "It will be hidden from sales, stock forms and reports."
-      : "It will be hidden from lists and forms.";
+      : s == "cust"
+        ? "It will no longer be offered when making a sale. Past sales keep the customer name."
+        : "It will be hidden from lists and forms.";
   ask(
     `Archive <b>${e(it.name)}</b>? ${note} Nothing is deleted. You can restore it any time by switching the filter to Archived.`,
     async () => {
@@ -680,16 +682,22 @@ function rSup() {
   );
 }
 function supInfo(id) {
-  const s = db.sup.find((x) => x.id === id);
-  if (!s) return;
+  const s = db.sup.find((x) => x.id === id),
+    box = $("#supdet");
+  if (!s || !box) return;
   const ps = db.prod.filter((p) => p.sup === id),
     h = db.mov
-      .filter((m) => m.type == "IN" && !m.adj && P(m.pid).sup === id)
+      .filter(
+        (m) =>
+          m.type == "IN" &&
+          !m.adj &&
+          m.note !== "Opening stock" &&
+          P(m.pid).sup === id,
+      )
       .slice()
       .reverse(),
     qty = h.reduce((a, m) => a + m.qty, 0);
-  dlg.className = "wide";
-  dlg.innerHTML = `<h3>${e(s.name)}</h3>
+  box.innerHTML = `<h3>${e(s.name)}</h3>
 <div class="tw"><table><tbody>${[
     ["Contact person", e(s.contact)],
     ["Phone", e(s.phone)],
@@ -714,8 +722,9 @@ ${
         .join("")}</tbody></table></div>`
     : ""
 }
-<div class="ft"><button class="b p" data-x>Close</button></div>`;
-  dlg.showModal();
+<div class="ft"><button class="b" data-a="supx">Close</button></div>`;
+  box.classList.remove("hide");
+  box.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 function rCust() {
   const q = $("#cq").value.toLowerCase(),
@@ -726,7 +735,7 @@ function rCust() {
       [
         "Customer",
         (c) =>
-          `<div class="pn"><span class="ch" data-st="--c:${cc(c.id)}"><span class="ms">person</span></span><b>${e(c.name)}</b></div>`,
+          `<div class="pn"><span class="ch" data-st="--c:${cc(c.id)}"><span class="ms">person</span></span><b>${e(c.name)}</b>${archTag(c)}</div>`,
       ],
       ["Mobile", (c) => e(c.phone || "—"), "m"],
       ["Barangay", (c) => e(c.brgy)],
@@ -738,17 +747,30 @@ function rCust() {
         (c) => money(mine(c).reduce((a, s) => a + total(s), 0)),
         "m",
       ],
+      ["Added / updated", dts],
       [
         "",
         (c) =>
-          can("customers")
-            ? `<button class="b s" data-a="edit" data-s="cust" data-id="${c.id}">Edit</button>`
-            : "",
+          c.arch
+            ? can("archive")
+              ? `<button class="b s" data-a="restore" data-s="cust" data-id="${c.id}">Restore</button>`
+              : ""
+            : (can("customers")
+                ? `<button class="b s" data-a="edit" data-s="cust" data-id="${c.id}">Edit</button>`
+                : "") +
+              (can("archive")
+                ? ` <button class="b s" data-a="arch" data-s="cust" data-id="${c.id}">Archive</button>`
+                : ""),
         "act",
       ],
     ],
-    db.cust.filter((c) => (c.name + " " + addr(c)).toLowerCase().includes(q)),
-    "No customers match your search. Add a customer to start selling.",
+    db.cust.filter(
+      (c) =>
+        arf("#cua")(c) && (c.name + " " + addr(c)).toLowerCase().includes(q),
+    ),
+    archEmpty("#cua", "customers") ||
+      "No customers match your search. Add a customer to start selling.",
+    archRow,
   );
 }
 function rMov() {
@@ -949,7 +971,7 @@ function newSale() {
 }
 function saleInfo(id) {
   const s = db.sales.find((x) => x.id == id);
-  dlg.innerHTML = `<h3>Receipt ${s.id}</h3><p class="mu" data-st="margin:0 0 12px">${s.date} · ${e(s.cust)} · ${e(s.pay)}</p><div class="tw"><table><thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Subtotal</th></tr></thead><tbody>${s.items.map((i) => `<tr><td>${e(P(i.pid).name || "—")}</td><td class="m">${i.qty}</td><td class="m">${money(i.price)}</td><td class="m">${money(i.qty * i.price)}</td></tr>`).join("")}</tbody></table></div><h3 data-st="margin-top:14px">Total ${money(total(s))}</h3><p class="mu" data-st="margin:4px 0 0">Includes ${db.set.tax}% VAT: ${money((total(s) * db.set.tax) / (100 + db.set.tax))} · Cashier: ${e(s.by || "—")}</p><div class="ft"><button class="b" data-a="exp" data-t="receipt ${s.id}">Print receipt</button><button class="b p" data-x>Close</button></div>`;
+  dlg.innerHTML = `<h3>Receipt ${s.id}</h3><p class="mu" data-st="margin:0 0 12px">${s.date} · ${e(s.cust)} · ${e(s.pay)}</p><div class="tw"><table><thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Subtotal</th></tr></thead><tbody>${s.items.map((i) => `<tr><td>${e(i.name || P(i.pid).name || "—")}</td><td class="m">${i.qty}</td><td class="m">${money(i.price)}</td><td class="m">${money(i.qty * i.price)}</td></tr>`).join("")}</tbody></table></div><h3 data-st="margin-top:14px">Total ${money(total(s))}</h3><p class="mu" data-st="margin:4px 0 0">Includes ${db.set.tax}% VAT: ${money((total(s) * db.set.tax) / (100 + db.set.tax))} · Cashier: ${e(s.by || "—")}</p><div class="ft"><button class="b p" data-x>Close</button></div>`;
   dlg.showModal();
 }
 
@@ -1215,6 +1237,110 @@ function rLogs() {
   $("#ltbl").innerHTML = tlHtml(
     db.logs.filter((l) => (l.u + l.a).toLowerCase().includes(q)).reverse(),
   );
+  rHist(q);
+}
+/* Record change history: previous values of edited, archived and restored records */
+const HT = {
+  products: ["Product", "product_name"],
+  categories: ["Category", "category_name"],
+  suppliers: ["Supplier", "company_name"],
+  customers: ["Customer", "customer_name"],
+  users: ["Employee", "full_name"],
+  settings: ["Store settings", "store_name"],
+};
+const HF = {
+  sku: "SKU",
+  product_name: "Name",
+  category_id: "Category",
+  supplier_id: "Supplier",
+  unit_price: "Unit price",
+  reorder_level: "Reorder level",
+  unit: "Unit",
+  category_name: "Name",
+  description: "Description",
+  company_name: "Company",
+  contact_person: "Contact person",
+  phone: "Phone",
+  email: "Email",
+  address: "Address",
+  customer_name: "Name",
+  street: "Street",
+  barangay: "Barangay",
+  city: "City",
+  province: "Province",
+  full_name: "Name",
+  username: "Username",
+  role_id: "Role",
+  job_title: "Position",
+  status: "Status",
+  store_name: "Store name",
+  tax_rate: "Tax rate (%)",
+  receipt_footer: "Receipt footer",
+};
+const hv = (k, v) =>
+  v === null || v === "" || v === undefined
+    ? "—"
+    : k == "category_id"
+      ? nm("cats", +v)
+      : k == "supplier_id"
+        ? nm("sup", +v)
+        : k == "role_id"
+          ? ROLE[["", "admin", "manager", "inventory", "cashier"][+v]] || v
+          : String(v);
+const hdiff = (h) =>
+  Object.keys(h.new)
+    .filter(
+      (k) =>
+        h.old[k] !== h.new[k] && !(k == "archived_at" && h.type != "UPDATE"),
+    )
+    .map((k) => [HF[k] || k, hv(k, h.old[k]), hv(k, h.new[k])]);
+function rHist(q) {
+  const rows = (db.hist || [])
+    .map((h) => {
+      const t = HT[h.tbl] || [h.tbl, ""],
+        name = h.new[t[1]] || h.old[t[1]] || "#" + h.id;
+      return { h, t: t[0], name, d: hdiff(h) };
+    })
+    .filter((r) =>
+      (
+        r.t +
+        " " +
+        r.name +
+        " " +
+        r.h.u +
+        " " +
+        r.d.map((x) => x.join(" ")).join(" ")
+      )
+        .toLowerCase()
+        .includes(q),
+    );
+  tbl(
+    "#htbl",
+    [
+      ["When", (r) => r.h.t, "m"],
+      ["Record", (r) => `<b>${e(r.name)}</b><div class="mu2">${e(r.t)}</div>`],
+      [
+        "Change",
+        (r) =>
+          `<span class="tg">${r.h.type == "ARCHIVE" ? "Archived" : r.h.type == "RESTORE" ? "Restored" : "Edited"}</span>`,
+      ],
+      [
+        "Previous → new values",
+        (r) =>
+          r.d.length
+            ? r.d
+                .map(
+                  (x) =>
+                    `<div class="mu2"><b>${e(x[0])}:</b> ${e(x[1])} → ${e(x[2])}</div>`,
+                )
+                .join("")
+            : "—",
+      ],
+      ["By", (r) => e(r.h.u)],
+    ],
+    rows,
+    "No changes recorded yet.",
+  );
 }
 /* SETTINGS = the signed-in employee's own details (name, position, email, phone, password) */
 function rSet() {
@@ -1235,6 +1361,8 @@ function rProfile() {
       ["Email", me.email || "—"],
       ["Mobile number", me.phone || "—"],
       ["Role", ROLE[me.role]],
+      ["Account created", me.cr || "—"],
+      ["Last updated", me.up || "—"],
     ]
       .map((r) => `<tr><td><b>${r[0]}</b></td><td>${e(r[1])}</td></tr>`)
       .join("")}</tbody></table>`;
@@ -1312,6 +1440,12 @@ function setForm() {
       toast("Settings saved");
     },
   );
+  const h = dlg.querySelector("h3");
+  if (h)
+    h.insertAdjacentHTML(
+      "afterend",
+      `<p class="mu">Created ${e(db.set.cr || "—")} · Last updated ${e(db.set.up || "—")}</p>`,
+    );
 }
 // STOCK COUNT CORRECTION
 function adjust(id) {
@@ -1558,7 +1692,7 @@ document.addEventListener("click", (ev) => {
     po: () => toast("Purchase orders are not enabled for this store yet"),
     sale: () => saleInfo(d.id),
     supd: () => supInfo(+d.id),
-    exp: () => toast("Preparing " + d.t + " export"),
+    supx: () => $("#supdet").classList.add("hide"),
     adj: () => (can("stock") ? adjust(+d.id) : deny()),
     set: () => (ADM() ? setForm() : deny()),
     read: () => {
@@ -1574,7 +1708,7 @@ document.addEventListener("click", (ev) => {
   })[d.a]();
 });
 ["#pq", "#sq", "#cq"].forEach((s) => ($(s).oninput = () => show(cur)));
-["#pc", "#mf", "#pa", "#ca", "#sa", "#ea"].forEach(
+["#pc", "#mf", "#pa", "#ca", "#sa", "#cua", "#ea"].forEach(
   (s) => ($(s).onchange = () => show(cur)),
 );
 $("#menu").onclick = () => document.body.classList.toggle("nav-open");

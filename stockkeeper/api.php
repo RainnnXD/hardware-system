@@ -66,7 +66,7 @@ function current_user() {
     if ($u !== false) return $u;
     $u = null;
     if (!empty($_SESSION["uid"])) {
-        $r = rows("SELECT user_id, full_name, username, email, phone, job_title, role_id, status FROM users WHERE user_id = ?", "i", [$_SESSION["uid"]])[0] ?? null;
+        $r = rows("SELECT user_id, full_name, username, email, phone, job_title, role_id, status, " . DT . " FROM users WHERE user_id = ?", "i", [$_SESSION["uid"]])[0] ?? null;
         if ($r && $r["status"] === "Active") {
             $u = [
                 "id"       => (int)$r["user_id"],
@@ -76,6 +76,8 @@ function current_user() {
                 "phone"    => $r["phone"] ?? "",
                 "title"    => $r["job_title"] ?? "",
                 "role"     => $ROLE_KEY[(int)$r["role_id"]],
+                "cr"       => $r["cr"],
+                "up"       => $r["up"],
             ];
         }
     }
@@ -86,6 +88,8 @@ function need($perm = null) {
     $u = current_user();
     if (!$u) fail("Please sign in", 401);
     if ($perm && !in_array($u["role"], $CAN[$perm])) fail("Permission denied: your role cannot do this", 403);
+    global $conn;
+    $conn->query("SET @app_user_id = " . (int)$u["id"]); // lets the history triggers record who made each change
     return $u;
 }
 
@@ -248,7 +252,7 @@ case "bootstrap":
               FROM products ORDER BY product_id DESC"));
 
     $data["mov"] = array_map(fn($r) => ["id" => (int)$r["movement_id"], "date" => $r["d"], "pid" => (int)$r["product_id"],
-        "type" => substr($r["movement_type"], -2) === "IN" ? "IN" : "OUT", "qty" => (int)$r["quantity"],
+        "type" => substr($r["movement_type"], -2) === "IN" ? "IN" : "OUT", "qty" => (int)$r["quantity"], "adj" => substr($r["movement_type"], 0, 3) === "ADJ",
         "note" => $r["remarks"] ?: "—", "by" => $r["full_name"]],
         rows("SELECT m.movement_id, DATE_FORMAT(m.movement_date, '%Y-%m-%d %H:%i') d, m.product_id, m.movement_type, m.quantity, m.remarks, u.full_name
               FROM inventory_movements m JOIN users u ON u.user_id = m.user_id
@@ -260,8 +264,8 @@ case "bootstrap":
         rows("SELECT customer_id, customer_name, phone, street, barangay, city, province, archived_at IS NOT NULL AS arch, " . DTA . " FROM customers ORDER BY customer_id DESC"));
 
     $items = [];
-    foreach (rows("SELECT sale_id, product_id, quantity, unit_price FROM sale_items ORDER BY sale_item_id") as $r) {
-        $items[(int)$r["sale_id"]][] = ["pid" => (int)$r["product_id"], "qty" => (int)$r["quantity"], "price" => (float)$r["unit_price"]];
+    foreach (rows("SELECT sale_id, product_id, product_name, quantity, unit_price FROM sale_items ORDER BY sale_item_id") as $r) {
+        $items[(int)$r["sale_id"]][] = ["pid" => (int)$r["product_id"], "name" => $r["product_name"], "qty" => (int)$r["quantity"], "price" => (float)$r["unit_price"]];
     }
     $data["sales"] = array_map(fn($r) => ["id" => $r["receipt_number"], "date" => $r["d"], "cid" => $r["customer_id"] === null ? null : (int)$r["customer_id"], "cust" => $r["customer_name"],
         "pay" => $r["payment_method"], "by" => $r["full_name"], "items" => $items[(int)$r["sale_id"]] ?? []],
@@ -269,9 +273,9 @@ case "bootstrap":
               FROM sales s JOIN users u ON u.user_id = s.user_id
               ORDER BY s.sale_date, s.sale_id"));
 
-    $s = rows("SELECT store_name, tax_rate, reorder_level, receipt_footer FROM settings WHERE setting_id = 1")[0]
+    $s = rows("SELECT store_name, tax_rate, reorder_level, receipt_footer, " . DT . " FROM settings WHERE setting_id = 1")[0]
          ?? ["store_name" => "Stock Keeper", "tax_rate" => 12, "reorder_level" => 20, "receipt_footer" => ""];
-    $data["set"] = ["store" => $s["store_name"], "tax" => (float)$s["tax_rate"], "reorder" => (int)$s["reorder_level"], "footer" => $s["receipt_footer"] ?? ""];
+    $data["set"] = ["store" => $s["store_name"], "tax" => (float)$s["tax_rate"], "reorder" => (int)$s["reorder_level"], "footer" => $s["receipt_footer"] ?? "", "cr" => $s["cr"] ?? "", "up" => $s["up"] ?? ""];
 
     // employees and logs are only sent to roles that can see them
     $data["emp"] = [];
@@ -288,6 +292,15 @@ case "bootstrap":
                     SELECT l.log_id, DATE_FORMAT(l.date_created, '%Y-%m-%d %H:%i') d, u.full_name, u.role_id, l.description
                     FROM activity_logs l LEFT JOIN users u ON u.user_id = l.user_id
                     ORDER BY l.log_id DESC LIMIT 300) t ORDER BY log_id"));
+    }
+    $data["hist"] = [];
+    if (in_array($u["role"], ["admin", "manager"])) {
+        $data["hist"] = array_map(fn($r) => ["t" => $r["d"], "tbl" => $r["table_name"], "id" => (int)$r["record_id"], "type" => $r["change_type"],
+            "old" => json_decode($r["old_values"], true) ?: [], "new" => json_decode($r["new_values"], true) ?: [], "u" => $r["full_name"] ?? "System"],
+            rows("SELECT h.history_id, h.table_name, h.record_id, h.change_type, DATE_FORMAT(h.changed_at, '%Y-%m-%d %H:%i') d, h.old_values, h.new_values, u.full_name
+                  FROM record_history h LEFT JOIN users u ON u.user_id = h.changed_by
+                  WHERE " . ($u["role"] === "admin" ? "1 = 1" : "h.table_name <> 'users'") . "
+                  ORDER BY h.history_id DESC LIMIT 500"));
     }
     out(["user" => $u, "data" => $data]);
 
