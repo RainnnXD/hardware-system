@@ -218,7 +218,8 @@ function ask(msg, fn, label) {
 const EMAIL_RE =
   /^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/;
 const PH_RE = /^09\d{9}$/; /* 09XXXXXXXXX, exactly 11 digits */
-const LAND_RE = /^(09\d{9}|0[2-8]\d{7,9})$/; /* mobile or landline (suppliers) */
+const LAND_RE =
+  /^(09\d{9}|0[2-8]\d{7,9})$/; /* mobile or landline (suppliers) */
 function openForm(title, fs, vals, save) {
   const ph = (f) => (f.ph ? ` placeholder="${e(f.ph)}"` : "");
   dlg.innerHTML = `<form novalidate><h3>${title}</h3>${fs.map((f) => `<label>${f.l}${f.t == "multi" ? `<select name="${f.n}" multiple size="${Math.min(5, f.o.length || 1)}">${f.o.map((o) => `<option value="${o[0]}">${e(o[1])}</option>`).join("")}</select>` : f.t == "select" ? `<select name="${f.n}">${f.ph ? `<option value="" disabled selected hidden>${e(f.ph)}</option>` : ""}${f.o.map((o) => `<option value="${o[0]}">${e(o[1])}</option>`).join("")}</select>` : f.t == "password" ? `<span class="pw"><input name="${f.n}" type="password"${ph(f)}>${PWBTN}</span>` : `<input name="${f.n}" type="${f.t || "text"}"${f.ro ? " readonly" : ""}${f.t == "number" ? ` min="${f.min ?? 0}" step="${f.step || 1}"` : ""}>`}${f.h ? `<small class="hint">${f.h}</small>` : ""}<small class="er"></small></label>`).join("")}<div class="ft"><button type="button" class="b" data-x>Cancel</button><button class="b p">Save</button></div></form>`;
@@ -345,7 +346,9 @@ function nextSku(catId) {
   if (same) pre = same.sku.split("-")[0];
   else {
     const w = c.name.split(/[^A-Za-z]+/).filter(Boolean);
-    pre = (w.length > 1 ? w[0][0] + w[1][0] : (w[0] || "XX").slice(0, 2)).toUpperCase();
+    pre = (
+      w.length > 1 ? w[0][0] + w[1][0] : (w[0] || "XX").slice(0, 2)
+    ).toUpperCase();
   }
   let top = 0;
   db.prod.forEach((p) => {
@@ -415,8 +418,8 @@ const S = {
         ph: "e.g. bag, pcs, kg",
         v: (value) =>
           /^[a-zA-Z ]+$/.test(String(value).trim())
-        ? ""
-        : "Letters only. Numbers and special characters are not allowed",
+            ? ""
+            : "Letters only. Numbers and special characters are not allowed",
       },
     ],
   },
@@ -439,12 +442,29 @@ const S = {
     f: () => [
       { n: "name", l: "Company", ph: "e.g. Calamba Cement & Masonry Depot" },
       { n: "contact", l: "Contact person", ph: "e.g. Juan Dela Cruz" },
-      { n: "street", l: "Street / building (optional)", opt: 1, ph: "e.g. MacArthur Highway" },
+      {
+        n: "street",
+        l: "Street / building (optional)",
+        opt: 1,
+        ph: "e.g. MacArthur Highway",
+      },
       { n: "brgy", l: "Barangay", ph: "e.g. Real" },
       { n: "city", l: "City / Municipality", ph: "e.g. Calamba City" },
       { n: "prov", l: "Province", ph: "e.g. Laguna" },
-      { n: "phone", l: "Phone", t: "tel", land: 1, ph: "09XXXXXXXXX or 028XXXXXXX" },
-      { n: "email", l: "Email (optional)", t: "email", opt: 1, ph: "name@company.com" },
+      {
+        n: "phone",
+        l: "Phone",
+        t: "tel",
+        land: 1,
+        ph: "09XXXXXXXXX or 028XXXXXXX",
+      },
+      {
+        n: "email",
+        l: "Email (optional)",
+        t: "email",
+        opt: 1,
+        ph: "name@company.com",
+      },
     ],
   },
   cust: {
@@ -460,7 +480,12 @@ const S = {
       },
       { n: "name", l: "Customer name", ph: "e.g. Maria Santos" },
       { n: "phone", l: "Mobile number", t: "tel", ph: "09XXXXXXXXX" },
-      { n: "street", l: "Street / building (optional)", opt: 1, ph: "e.g. 12 Rizal St." },
+      {
+        n: "street",
+        l: "Street / building (optional)",
+        opt: 1,
+        ph: "e.g. 12 Rizal St.",
+      },
       { n: "brgy", l: "Barangay", ph: "e.g. Banay-banay" },
       { n: "city", l: "City / Municipality", ph: "e.g. Cabuyao" },
       { n: "prov", l: "Province", ph: "e.g. Laguna" },
@@ -576,8 +601,9 @@ function setEmpStatus(id, status) {
   if (
     status == "Inactive" &&
     (it.roles || []).includes("admin") &&
-    db.emp.filter((u) => (u.roles || []).includes("admin") && u.status == "Active")
-      .length < 2
+    db.emp.filter(
+      (u) => (u.roles || []).includes("admin") && u.status == "Active",
+    ).length < 2
   )
     return toast("You cannot deactivate the last active administrator", "bad");
   const go = async () => {
@@ -651,7 +677,10 @@ function mk(id, type, labels, data, label) {
 const saleCols = [
   ["Receipt", (s) => `<b>${s.id}</b>`, "m"],
   ["Date", (s) => s.date, "m"],
-  ["Customer", (s) => e(s.cust) + (s.cid ? `<div class="mu2">${e(s.cid)}</div>` : "")],
+  [
+    "Customer",
+    (s) => e(s.cust) + (s.cid ? `<div class="mu2">${e(s.cid)}</div>` : ""),
+  ],
   ["Lines", (s) => s.items.length],
   ["Cashier", (s) => e(s.by || "—")],
   ["Payment", (s) => e(s.pay)],
@@ -755,7 +784,8 @@ function rSup() {
         "City",
         (s) =>
           s.city || s.prov
-            ? e(s.city || "—") + (s.prov ? `<div class="mu2">${e(s.prov)}</div>` : "")
+            ? e(s.city || "—") +
+              (s.prov ? `<div class="mu2">${e(s.prov)}</div>` : "")
             : e(s.addr || "—"),
       ],
       ["Phone", (s) => e(s.phone), "m"],
@@ -786,8 +816,7 @@ function rCust() {
       ["Mobile", (c) => e(c.phone), "m"],
       [
         "Address",
-        (c) =>
-          e([c.street, c.brgy, c.city, c.prov].filter(Boolean).join(", ")),
+        (c) => e([c.street, c.brgy, c.city, c.prov].filter(Boolean).join(", ")),
       ],
       ["Added / updated", dts],
       ["", (c) => custActs(c), "act"],
@@ -795,7 +824,9 @@ function rCust() {
     db.cust
       .filter(arf("#cua"))
       .filter((c) =>
-        (c.code + " " + c.name + " " + c.brgy + " " + c.city).toLowerCase().includes(q),
+        (c.code + " " + c.name + " " + c.brgy + " " + c.city)
+          .toLowerCase()
+          .includes(q),
       ),
     archEmpty("#cua", "customers") || "No customers yet.",
     archRow,
@@ -839,7 +870,9 @@ function rSales() {
   tbl(
     "#stbl2",
     saleCols,
-    db.sales.filter((s) => (s.id + s.cust + (s.cid || "")).toLowerCase().includes(q)).reverse(),
+    db.sales
+      .filter((s) => (s.id + s.cust + (s.cid || "")).toLowerCase().includes(q))
+      .reverse(),
     "No sales match your search.",
   );
 }
@@ -958,7 +991,13 @@ function newSale() {
         l: "Customer",
         t: "select",
         num: 1,
-        o: [[0, "Walk-in"], ...actv("cust").map((c) => [c.id, `${c.code} · ${c.name} (${c.brgy}, ${c.city})`])],
+        o: [
+          [0, "Walk-in"],
+          ...actv("cust").map((c) => [
+            c.id,
+            `${c.code} · ${c.name} (${c.brgy}, ${c.city})`,
+          ]),
+        ],
       },
       {
         n: "pid",
@@ -1324,12 +1363,12 @@ const hv = (k, v) =>
     : Array.isArray(v)
       ? v.join(", ")
       : k == "category_id"
-      ? nm("cats", +v)
-      : k == "supplier_id"
-        ? nm("sup", +v)
-        : k == "role_id"
-          ? ROLE[["", "admin", "manager", "inventory", "cashier"][+v]] || v
-          : String(v);
+        ? nm("cats", +v)
+        : k == "supplier_id"
+          ? nm("sup", +v)
+          : k == "role_id"
+            ? ROLE[["", "admin", "manager", "inventory", "cashier"][+v]] || v
+            : String(v);
 const hdiff = (h) =>
   Object.keys(h.new)
     .filter(
@@ -1521,7 +1560,8 @@ function adjust(id) {
     { stock: p.stock },
     async (d) => {
       if (d.stock === p.stock) return toast("Quantity unchanged");
-      if (!(await api("adjust_stock", { pid: id, stock: d.stock }))) return false;
+      if (!(await api("adjust_stock", { pid: id, stock: d.stock })))
+        return false;
       await load();
       show(cur);
       toast(`Quantity updated: ${p.name} now ${d.stock} ${p.unit}`);
