@@ -219,8 +219,10 @@ function openForm(title, fs, vals, save) {
   const touched = new Set();
   /* returns true when the field is INVALID, and paints/clears the red state */
   const check = (f, d) => {
-    const x = d[f.n],
-      empty = x === "" || Number.isNaN(x);
+    const el = fm.elements[f.n],
+      x = d[f.n],
+      empty = x === "" || Number.isNaN(x),
+      bad = f.t == "number" && el.validity.badInput;
     let m = "";
     if (bad) m = "Enter a valid number";
     else if (empty && !f.opt) m = "This field is required";
@@ -347,6 +349,18 @@ const S = {
       { n: "city", l: "City / Province", ph: "e.g. Calamba City, Laguna" },
       { n: "phone", l: "Phone", t: "tel", ph: "09XXXXXXXXX" },
       { n: "email", l: "Email", t: "email", ph: "name@company.com" },
+    ],
+  },
+  cust: {
+    k: "cust",
+    t: "Customer",
+    f: () => [
+      { n: "name", l: "Customer name", ph: "e.g. Maria Santos" },
+      { n: "phone", l: "Mobile number", t: "tel", ph: "09XXXXXXXXX" },
+      { n: "street", l: "Street / building (optional)", ph: "e.g. 12 Rizal St." },
+      { n: "brgy", l: "Barangay", ph: "e.g. Banay-banay" },
+      { n: "city", l: "City / Municipality", ph: "e.g. Cabuyao" },
+      { n: "prov", l: "Province", ph: "e.g. Laguna" },
     ],
   },
 };
@@ -607,6 +621,44 @@ function rSup() {
     db.sup.filter(arf("#sa")),
     archEmpty("#sa", "suppliers") || "No suppliers yet.",
     archRow,
+  );
+}
+function rCust() {
+  const q = ($("#cq").value || "").toLowerCase();
+  tbl(
+    "#cutbl",
+    [
+      ["Customer", (c) => `<b>${e(c.name)}</b>${archTag(c)}`],
+      ["Mobile", (c) => e(c.phone), "m"],
+      [
+        "Address",
+        (c) =>
+          e([c.street, c.brgy, c.city, c.prov].filter(Boolean).join(", ")),
+      ],
+      ["Added / updated", dts],
+      ["", (c) => custActs(c), "act"],
+    ],
+    db.cust
+      .filter(arf("#cua"))
+      .filter((c) =>
+        (c.name + " " + c.brgy + " " + c.city).toLowerCase().includes(q),
+      ),
+    archEmpty("#cua", "customers") || "No customers yet.",
+    archRow,
+  );
+}
+/* Customers: admin, manager and cashier can edit; only admin can archive/restore */
+function custActs(c) {
+  if (!can("customers")) return "";
+  if (c.arch)
+    return can("archive")
+      ? `<button class="b s" data-a="restore" data-s="cust" data-id="${c.id}">Restore</button>`
+      : "";
+  return (
+    `<button class="b s" data-a="edit" data-s="cust" data-id="${c.id}">Edit</button>` +
+    (can("archive")
+      ? ` <button class="b s" data-a="arch" data-s="cust" data-id="${c.id}">Archive</button>`
+      : "")
   );
 }
 function rMov() {
@@ -1322,6 +1374,32 @@ document.addEventListener("click", (ev) => {
 });
 ["#eq", "#lq"].forEach((s) => ($(s).oninput = () => show(cur)));
 /* LOGIN PASSWORD CHECKED AGAINST THE HASH*/
+const loginTouched = new Set();
+function paintLogin(inp, msg) {
+  const lb = inp.closest("label");
+  lb.classList.toggle("e", !!msg);
+  lb.querySelector(".er").textContent = msg;
+  if (msg) inp.setAttribute("aria-invalid", "true");
+  else inp.removeAttribute("aria-invalid");
+}
+/* returns true when the field is INVALID */
+function checkLogin(inp) {
+  const msg =
+    inp.value.trim() !== ""
+      ? ""
+      : inp.id == "lu"
+        ? "Enter your username or email"
+        : "Enter your password";
+  paintLogin(inp, msg);
+  return !!msg;
+}
+["#lu", "#lp"].forEach((s) =>
+  $(s).addEventListener("input", () => {
+    delete $(s).closest("label").dataset.srv;
+    loginTouched.add($(s).id);
+    checkLogin($(s));
+  }),
+);
 function buildLogin() {
   $("#lu").value = "";
   $("#lp").value = "";
@@ -1480,8 +1558,8 @@ document.addEventListener("click", (ev) => {
     mypw: changeMyPw,
   })[d.a]();
 });
-["#pq", "#sq"].forEach((s) => ($(s).oninput = () => show(cur)));
-["#pc", "#mf", "#pa", "#ca", "#sa", "#ea"].forEach(
+["#pq", "#sq", "#cq"].forEach((s) => ($(s).oninput = () => show(cur)));
+["#pc", "#mf", "#pa", "#ca", "#sa", "#ea", "#cua"].forEach(
   (s) => ($(s).onchange = () => show(cur)),
 );
 $("#menu").onclick = () => document.body.classList.toggle("nav-open");

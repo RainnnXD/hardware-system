@@ -57,6 +57,7 @@ $CAN = [
     "users"  => ["admin"],
     "stock"  => ["admin", "inventory"],
     "sell"   => ["admin", "cashier"],
+    "customers" => ["admin", "manager", "cashier"],
 ];
 
 function current_user() {
@@ -146,6 +147,7 @@ $ARCHIVABLE = [
     "product"  => ["products",   "product_id",  "manage"],
     "category" => ["categories", "category_id", "manage"],
     "supplier" => ["suppliers",  "supplier_id", "manage"],
+    "customer" => ["customers",  "customer_id", "manage"],
 ];
 if (preg_match('/^(archive|restore)_([a-z]+)$/', $action, $m) && isset($ARCHIVABLE[$m[2]])) {
     $doArchive = $m[1] === "archive";
@@ -383,25 +385,6 @@ case "save_supplier":
                  "ssssssssi", [$name, $contact, $phone, $email, $street, $brgy, $city, $prov, $id]);
     else     run("INSERT INTO suppliers (company_name, contact_person, phone, email, street, barangay, city, province) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                  "ssssssss", [$name, $contact, $phone, $email, $street, $brgy, $city, $prov]);
-    out(["ok" => true]);
-
-/* ====================== CUSTOMERS ====================== */
-case "save_customer":
-    need("customers");
-    $id = (int)($in["id"] ?? 0);
-    $name = $str("name", 120); $phone = $str("phone", 30); $street = $str("street", 120);
-    $brgy = $str("brgy", 80); $city = $str("city", 80); $prov = $str("prov", 80);
-    $street = $street === "" ? null : $street;
-    if ($name === "" || $phone === "" || $brgy === "" || $city === "" || $prov === "") fail("Name, phone, barangay, city and province are required");
-    if (!valid_ph_phone($phone)) fail("Enter a valid Philippine mobile number (09XXXXXXXXX)");
-    if ($id) {
-        if (!rows("SELECT 1 FROM customers WHERE customer_id = ?", "i", [$id])) fail("Customer not found", 404);
-        run("UPDATE customers SET customer_name=?, phone=?, street=?, barangay=?, city=?, province=? WHERE customer_id=?",
-            "ssssssi", [$name, $phone, $street, $brgy, $city, $prov, $id]);
-    } else {
-        run("INSERT INTO customers (customer_name, phone, street, barangay, city, province) VALUES (?, ?, ?, ?, ?, ?)",
-            "ssssss", [$name, $phone, $street, $brgy, $city, $prov]);
-    }
     out(["ok" => true]);
 
 /* ====================== CUSTOMERS ====================== */
