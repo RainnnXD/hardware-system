@@ -21,7 +21,7 @@ function fail($msg, $code = 400) {
 set_exception_handler(function ($ex) {
     if ($ex instanceof mysqli_sql_exception) {
         if ($ex->getCode() == 1451) fail("Records are never deleted. Archive it instead", 409);
-        if ($ex->getCode() == 1062) fail("That value already exists (duplicate SKU, name or email)", 409);
+        if ($ex->getCode() == 1062) fail("That value already exists (duplicate name, SKU, email, username or receipt number)", 409);
         if (in_array($ex->getCode(), [3819, 4025])) fail("A value was rejected by the database rules", 422);
     }
     error_log($ex->getMessage());
@@ -94,6 +94,45 @@ function need($perm = null) {
     return $u;
 }
 
+/* Activity log is written by the server only (the client can no longer post log lines). */
+function audit($text, $uid = null) {
+    $text = mb_substr($text, 0, 500);
+    if ($uid === null) { $cu = current_user(); $uid = $cu ? $cu["id"] : null; }
+    if (preg_match('/^Signed in/', $text))             $code = "LOGIN";
+    elseif (preg_match('/^Signed out/', $text))        $code = "LOGOUT";
+    elseif (preg_match('/^Sale/', $text))              $code = "SALE_CREATE";
+    elseif (preg_match('/^(Stock|Quantity)/', $text))  $code = "STOCK";
+    elseif (preg_match('/archived|restored/i', $text)) $code = "UPDATE";
+    elseif (preg_match('/added/i', $text))             $code = "CREATE";
+    else                                               $code = "UPDATE";
+    run("INSERT INTO activity_logs (user_id, action, description) VALUES (?, ?, ?)", "iss", [$uid, $code, $text]);
+}
+
+/* ---------- supplier links (many-to-many) ---------- */
+/* Make sure a product's main supplier is an active one; if not, promote another active supplier. */
+function fix_primary($pid) {
+    $cur = rows("SELECT s.archived_at FROM product_suppliers ps JOIN suppliers s ON s.supplier_id = ps.supplier_id
+                 WHERE ps.product_id = ? AND ps.is_primary = 1", "i", [$pid])[0] ?? null;
+    if ($cur && $cur["archived_at"] === null) return;
+    $n = rows("SELECT ps.supplier_id FROM product_suppliers ps JOIN suppliers s ON s.supplier_id = ps.supplier_id
+               WHERE ps.product_id = ? AND s.archived_at IS NULL ORDER BY ps.supplier_id LIMIT 1", "i", [$pid])[0] ?? null;
+    if (!$n) return;
+    run("UPDATE product_suppliers SET is_primary = 0 WHERE product_id = ?", "i", [$pid]);
+    run("UPDATE product_suppliers SET is_primary = 1 WHERE product_id = ? AND supplier_id = ?", "ii", [$pid, (int)$n["supplier_id"]]);
+}
+/* Replace a product's active-supplier links with $all, and mark $main as the main supplier.
+   Links to archived (withdrawn) suppliers are kept as history. */
+function save_links($pid, $main, $all) {
+    run("UPDATE product_suppliers SET is_primary = 0 WHERE product_id = ?", "i", [$pid]);
+    $keep = implode(",", array_map("intval", $all));
+    run("DELETE ps FROM product_suppliers ps JOIN suppliers s ON s.supplier_id = ps.supplier_id
+         WHERE ps.product_id = ? AND s.archived_at IS NULL AND ps.supplier_id NOT IN ($keep)", "i", [$pid]);
+    foreach ($all as $sid)
+        run("INSERT INTO product_suppliers (product_id, supplier_id, is_primary) VALUES (?, ?, 0)
+             ON DUPLICATE KEY UPDATE product_id = product_id", "ii", [$pid, (int)$sid]);
+    run("UPDATE product_suppliers SET is_primary = 1 WHERE product_id = ? AND supplier_id = ?", "ii", [$pid, (int)$main]);
+}
+
 /* ---------- input ---------- */
 $action = $_GET["action"] ?? "";
 $in = json_decode(file_get_contents("php://input"), true);
@@ -157,19 +196,19 @@ function valid_supplier_phone($p) {
    Records are never removed. Archiving sets archived_at; restoring clears it.
    Requires the archived_at columns defined in stockkeeper.sql. */
 $ARCHIVABLE = [
-    "product"  => ["products",   "product_id",  "archive"],
-    "category" => ["categories", "category_id", "archive"],
-    "supplier" => ["suppliers",  "supplier_id", "archive"],
-    "customer" => ["customers",  "customer_id", "archive"],
+    "product"  => ["products",   "product_id",  "archive", "product_name"],
+    "category" => ["categories", "category_id", "archive", "category_name"],
+    "supplier" => ["suppliers",  "supplier_id", "archive", "company_name"],
+    "customer" => ["customers",  "customer_id", "archive", "customer_name"],
 ];
 if (preg_match('/^(archive|restore)_([a-z]+)$/', $action, $m) && isset($ARCHIVABLE[$m[2]])) {
     $doArchive = $m[1] === "archive";
     $kind = $m[2];
-    [$tbl, $pk, $perm] = $ARCHIVABLE[$kind];
+    [$tbl, $pk, $perm, $nmc] = $ARCHIVABLE[$kind];
     $u = need($perm);
     $id = (int)($in["id"] ?? 0);
     if ($id < 1) fail("Choose a valid record");
-    $rec = rows("SELECT archived_at FROM `$tbl` WHERE `$pk` = ?", "i", [$id])[0] ?? null;
+    $rec = rows("SELECT archived_at, `$nmc` AS nm FROM `$tbl` WHERE `$pk` = ?", "i", [$id])[0] ?? null;
     if (!$rec) fail("Record not found", 404);
     $isArchived = $rec["archived_at"] !== null;
     if ($doArchive === $isArchived) out(["ok" => true, "archived" => $isArchived]); // nothing to change
@@ -177,19 +216,35 @@ if (preg_match('/^(archive|restore)_([a-z]+)$/', $action, $m) && isset($ARCHIVAB
     if ($doArchive) {
         if ($kind === "category" && (int)rows("SELECT COUNT(*) c FROM products WHERE category_id = ? AND archived_at IS NULL", "i", [$id])[0]["c"] > 0)
             fail("Archive or move the active products in this category first", 409);
-        if ($kind === "supplier" && (int)rows("SELECT COUNT(*) c FROM products WHERE supplier_id = ? AND archived_at IS NULL", "i", [$id])[0]["c"] > 0)
-            fail("Archive or move the active products from this supplier first", 409);
+        if ($kind === "supplier") {
+            // A supplier may withdraw as long as every active product it supplies still has another active supplier.
+            $stuck = rows("SELECT p.product_name FROM products p
+                           JOIN product_suppliers ps ON ps.product_id = p.product_id AND ps.supplier_id = ?
+                           WHERE p.archived_at IS NULL AND NOT EXISTS (
+                               SELECT 1 FROM product_suppliers o JOIN suppliers s ON s.supplier_id = o.supplier_id
+                               WHERE o.product_id = p.product_id AND o.supplier_id <> ps.supplier_id AND s.archived_at IS NULL)
+                           ORDER BY p.product_name LIMIT 3", "i", [$id]);
+            if ($stuck) fail("Add another supplier to these products first: " . implode(", ", array_column($stuck, "product_name")), 409);
+        }
+        $conn->begin_transaction();
         run("UPDATE `$tbl` SET archived_at = NOW() WHERE `$pk` = ?", "i", [$id]);
+        if ($kind === "supplier") // products that had this supplier as main switch to another active supplier
+            foreach (rows("SELECT product_id FROM product_suppliers WHERE supplier_id = ? AND is_primary = 1", "i", [$id]) as $r)
+                fix_primary((int)$r["product_id"]);
+        $conn->commit();
     } else {
         if ($kind === "product") {
-            $p = rows("SELECT c.archived_at ca, s.archived_at sa FROM products p
-                       JOIN categories c ON c.category_id = p.category_id
-                       JOIN suppliers s ON s.supplier_id = p.supplier_id WHERE p.product_id = ?", "i", [$id])[0] ?? null;
+            $p = rows("SELECT c.archived_at ca FROM products p
+                       JOIN categories c ON c.category_id = p.category_id WHERE p.product_id = ?", "i", [$id])[0] ?? null;
             if ($p && $p["ca"] !== null) fail("Restore this product's category first", 409);
-            if ($p && $p["sa"] !== null) fail("Restore this product's supplier first", 409);
+            if (!rows("SELECT 1 FROM product_suppliers ps JOIN suppliers s ON s.supplier_id = ps.supplier_id
+                       WHERE ps.product_id = ? AND s.archived_at IS NULL LIMIT 1", "i", [$id]))
+                fail("Restore one of this product's suppliers first", 409);
         }
         run("UPDATE `$tbl` SET archived_at = NULL WHERE `$pk` = ?", "i", [$id]);
+        if ($kind === "product") fix_primary($id);
     }
+    audit(ucfirst($kind) . ($doArchive ? " archived: " : " restored: ") . $rec["nm"]);
     out(["ok" => true, "archived" => $doArchive]);
 }
 
@@ -213,9 +268,12 @@ case "login": // sign in with username OR email, plus password
     }
     session_regenerate_id(true);
     $_SESSION["uid"] = (int)$r["user_id"];
+    audit("Signed in", (int)$r["user_id"]);
     out(["ok" => true]);
 
 case "logout":
+    $lu = current_user();
+    if ($lu) audit("Signed out", $lu["id"]);
     $_SESSION = [];
     session_destroy();
     out(["ok" => true]);
@@ -238,6 +296,8 @@ case "deactivate_self":
         [$u["id"]]
     );
 
+    audit("Account deactivated: " . $u["name"]);
+
     // Log the user out
     $_SESSION = [];
     session_destroy();
@@ -255,9 +315,10 @@ case "register": // public sign-up. Administrators cannot be created this way.
     if ($name === "") fail("Full name is required");
     if (strlen($pw) < 6) fail("Use at least 6 characters for the password");
     if (!isset($ROLE_ID[$role]) || in_array($role, ["admin", "manager"])) fail("Choose a valid role. Administrator and Manager accounts are created by an administrator.");
-    $newId = make_user($name, $title, $role, $pw);
+    $newId = make_user($name, $title, $role, $pw, null, "Inactive"); // an administrator must activate it
     $uname = rows("SELECT username FROM users WHERE user_id = ?", "i", [$newId])[0]["username"] ?? "";
-    out(["id" => $newId, "username" => $uname]);
+    audit("Employee added: $name (self sign-up, waiting for activation)", $newId);
+    out(["id" => $newId, "username" => $uname, "pending" => true]);
 
 /* ====================== LOAD EVERYTHING ====================== */
 case "bootstrap":
@@ -274,10 +335,13 @@ case "bootstrap":
         "arch" => (bool)$r["arch"]],
         rows("SELECT supplier_id, company_name, contact_person, phone, email, address, street, barangay, city, province, archived_at IS NOT NULL AS arch FROM suppliers ORDER BY supplier_id DESC"));
 
+    $links = []; // product_id => [main supplier first, then the other suppliers]
+    foreach (rows("SELECT product_id, supplier_id FROM product_suppliers ORDER BY is_primary DESC, supplier_id") as $r)
+        $links[(int)$r["product_id"]][] = (int)$r["supplier_id"];
     $data["prod"] = array_map(fn($r) => ["id" => (int)$r["product_id"], "sku" => $r["sku"], "name" => $r["product_name"],
-        "cat" => (int)$r["category_id"], "sup" => (int)$r["supplier_id"], "price" => (float)$r["unit_price"],
+        "cat" => (int)$r["category_id"], "sup" => $links[(int)$r["product_id"]][0] ?? 0, "sups" => $links[(int)$r["product_id"]] ?? [], "price" => (float)$r["unit_price"],
         "stock" => (int)$r["stock_quantity"], "min" => (int)$r["reorder_level"], "unit" => $r["unit"], "arch" => (bool)$r["arch"], "cr" => $r["cr"], "up" => $r["up"], "ar" => $r["ar"]],
-        rows("SELECT product_id, sku, product_name, category_id, supplier_id, unit_price, stock_quantity, reorder_level, unit, archived_at IS NOT NULL AS arch, " . DTA . "
+        rows("SELECT product_id, sku, product_name, category_id, unit_price, stock_quantity, reorder_level, unit, archived_at IS NOT NULL AS arch, " . DTA . "
               FROM products ORDER BY product_id DESC"));
 
     $data["mov"] = array_map(fn($r) => ["id" => (int)$r["movement_id"], "date" => $r["d"], "pid" => (int)$r["product_id"],
@@ -287,19 +351,20 @@ case "bootstrap":
               FROM inventory_movements m JOIN users u ON u.user_id = m.user_id
               ORDER BY m.movement_date, m.movement_id"));
 
-    $data["cust"] = array_map(fn($r) => ["id" => (int)$r["customer_id"], "name" => $r["customer_name"], "phone" => $r["phone"],
+    $data["cust"] = array_map(fn($r) => ["id" => (int)$r["customer_id"], "code" => $r["customer_code"] ?? "", "name" => $r["customer_name"], "phone" => $r["phone"],
         "street" => $r["street"] ?? "", "brgy" => $r["barangay"], "city" => $r["city"], "prov" => $r["province"],
         "arch" => (bool)$r["arch"], "cr" => $r["cr"], "up" => $r["up"], "ar" => $r["ar"]],
-        rows("SELECT customer_id, customer_name, phone, street, barangay, city, province, archived_at IS NOT NULL AS arch, " . DTA . " FROM customers ORDER BY customer_id DESC"));
+        rows("SELECT customer_id, customer_code, customer_name, phone, street, barangay, city, province, archived_at IS NOT NULL AS arch, " . DTA . " FROM customers ORDER BY customer_id DESC"));
 
     $items = [];
     foreach (rows("SELECT sale_id, product_id, product_name, quantity, unit_price FROM sale_items ORDER BY sale_item_id") as $r) {
         $items[(int)$r["sale_id"]][] = ["pid" => (int)$r["product_id"], "name" => $r["product_name"], "qty" => (int)$r["quantity"], "price" => (float)$r["unit_price"]];
     }
-    $data["sales"] = array_map(fn($r) => ["id" => $r["receipt_number"], "date" => $r["d"], "cust" => $r["customer_name"],
+    $data["sales"] = array_map(fn($r) => ["id" => $r["receipt_number"], "date" => $r["d"], "cust" => $r["customer_name"], "cid" => $r["customer_code"] ?? "",
         "pay" => $r["payment_method"], "by" => $r["full_name"], "items" => $items[(int)$r["sale_id"]] ?? []],
-        rows("SELECT s.sale_id, s.receipt_number, DATE_FORMAT(s.sale_date, '%Y-%m-%d %H:%i') d, s.customer_name, s.payment_method, u.full_name
+        rows("SELECT s.sale_id, s.receipt_number, DATE_FORMAT(s.sale_date, '%Y-%m-%d %H:%i') d, s.customer_name, c.customer_code, s.payment_method, u.full_name
               FROM sales s JOIN users u ON u.user_id = s.user_id
+              LEFT JOIN customers c ON c.customer_id = s.customer_id
               ORDER BY s.sale_date, s.sale_id"));
 
     $s = rows("SELECT store_name, tax_rate, reorder_level, receipt_footer, " . DT . " FROM settings WHERE setting_id = 1")[0]
@@ -309,12 +374,12 @@ case "bootstrap":
     // employees and logs are only sent to roles that can see them
     $data["emp"] = [];
     if ($u["role"] === "admin") {
-        $data["emp"] = array_map(fn($r) => ["id" => (int)$r["user_id"], "name" => $r["full_name"], "title" => $r["job_title"] ?? "",
+        $data["emp"] = array_map(fn($r) => ["id" => (int)$r["user_id"], "name" => $r["full_name"], "username" => $r["username"], "title" => $r["job_title"] ?? "",
             "role" => $ROLE_KEY[(int)$r["role_id"]], "phone" => $r["phone"] ?: "—", "status" => $r["status"], "cr" => $r["cr"], "up" => $r["up"]],
-            rows("SELECT user_id, full_name, job_title, role_id, phone, status, " . DT . " FROM users ORDER BY user_id DESC"));
+            rows("SELECT user_id, full_name, username, job_title, role_id, phone, status, " . DT . " FROM users ORDER BY user_id DESC"));
     }
     $data["logs"] = [];
-    if (in_array($u["role"], ["admin", "manager"])) {
+    if ($u["role"] === "admin") {
         $data["logs"] = array_map(fn($r) => ["t" => $r["d"], "u" => $r["full_name"] ?? "Deleted user",
             "r" => $r["role_id"] ? $ROLE_KEY[(int)$r["role_id"]] : "cashier", "a" => $r["description"]],
             rows("SELECT * FROM (
@@ -323,7 +388,7 @@ case "bootstrap":
                     ORDER BY l.log_id DESC LIMIT 300) t ORDER BY log_id"));
     }
     $data["hist"] = [];
-    if (in_array($u["role"], ["admin", "manager"])) {
+    if ($u["role"] === "admin") {
         $data["hist"] = array_map(fn($r) => ["t" => $r["d"], "tbl" => $r["table_name"], "id" => (int)$r["record_id"], "type" => $r["change_type"],
             "old" => json_decode($r["old_values"], true) ?: [], "new" => json_decode($r["new_values"], true) ?: [], "u" => $r["full_name"] ?? "System"],
             rows("SELECT h.history_id, h.table_name, h.record_id, h.change_type, DATE_FORMAT(h.changed_at, '%Y-%m-%d %H:%i') d, h.old_values, h.new_values, u.full_name
@@ -338,21 +403,27 @@ case "save_product":
     $u = need("manage");
     $id = (int)($in["id"] ?? 0);
     $name = $str("name", 150); $unit = $str("unit", 20);
-    $cat = (int)($in["cat"] ?? 0); $sup = (int)($in["sup"] ?? 0);
+    $cat = (int)($in["cat"] ?? 0); $sup = (int)($in["sup"] ?? 0); // $sup = main supplier
+    $more = is_array($in["sups"] ?? null) ? array_map("intval", $in["sups"]) : [];
+    $all = array_values(array_unique(array_filter(array_merge([$sup], $more), fn($x) => $x > 0)));
     $price = (float)($in["price"] ?? 0); $stock = in_array($u["role"], $CAN["stock"]) ? (int)($in["stock"] ?? 0) : null; $min = (int)($in["min"] ?? 0);
     if ($name === "" || $unit === "") fail("Name and unit are required");
     if ($price <= 0) fail("Price must be greater than zero");
     if ($stock < 0 || $min < 0) fail("Stock and reorder level cannot be negative");
+    if ($price > 99999999.99 || $stock > 2000000000 || $min > 2000000000) fail("Price, stock or reorder level is too large");
     if (!rows("SELECT 1 FROM categories WHERE category_id = ? AND archived_at IS NULL", "i", [$cat])) fail("Choose an active category");
-    if (!rows("SELECT 1 FROM suppliers WHERE supplier_id = ? AND archived_at IS NULL", "i", [$sup])) fail("Choose an active supplier");
+    if ($sup < 1) fail("Choose a main supplier");
+    if (count($all) > 20) fail("A product can have at most 20 suppliers");
+    foreach ($all as $sid)
+        if (!rows("SELECT 1 FROM suppliers WHERE supplier_id = ? AND archived_at IS NULL", "i", [$sid])) fail("Choose active suppliers only");
     $conn->begin_transaction();
     if ($id) {
         $old = rows("SELECT sku, stock_quantity FROM products WHERE product_id = ? FOR UPDATE", "i", [$id])[0] ?? null;
         if (!$old) fail("Product not found", 404);
         $sku = $old["sku"];
         if ($stock === null) $stock = (int)$old["stock_quantity"]; // managers cannot change quantities
-        run("UPDATE products SET sku=?, product_name=?, category_id=?, supplier_id=?, unit_price=?, stock_quantity=?, reorder_level=?, unit=?
-             WHERE product_id=?", "ssiidiisi", [$sku, $name, $cat, $sup, $price, $stock, $min, $unit, $id]);
+        run("UPDATE products SET sku=?, product_name=?, category_id=?, unit_price=?, stock_quantity=?, reorder_level=?, unit=?
+             WHERE product_id=?", "ssidiisi", [$sku, $name, $cat, $price, $stock, $min, $unit, $id]);
         $diff = $stock - (int)$old["stock_quantity"];
         if ($diff != 0) { // keep the stock ledger honest when stock is edited here
             run("INSERT INTO inventory_movements (product_id, user_id, movement_type, quantity, remarks) VALUES (?, ?, ?, ?, 'Edited in product form')",
@@ -361,15 +432,17 @@ case "save_product":
     } else {
         $sku = next_sku($cat);
         if ($stock === null) $stock = 0; // opening stock is received by inventory staff
-        run("INSERT INTO products (sku, product_name, category_id, supplier_id, unit_price, stock_quantity, reorder_level, unit)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)", "ssiidiis", [$sku, $name, $cat, $sup, $price, $stock, $min, $unit]);
+        run("INSERT INTO products (sku, product_name, category_id, unit_price, stock_quantity, reorder_level, unit)
+             VALUES (?, ?, ?, ?, ?, ?, ?)", "ssidiis", [$sku, $name, $cat, $price, $stock, $min, $unit]);
         $newId = $conn->insert_id;
         if ($stock > 0) {
             run("INSERT INTO inventory_movements (product_id, user_id, movement_type, quantity, remarks) VALUES (?, ?, 'IN', ?, 'Opening stock')",
                 "iii", [$newId, $u["id"], $stock]);
         }
     }
+    save_links($id ?: $newId, $sup, $all);
     $conn->commit();
+    audit("Product " . ($id ? "updated: " : "added: ") . $name);
     out(["ok" => true, "sku" => $sku]);
 
 /* ====================== CATEGORIES ====================== */
@@ -382,6 +455,7 @@ case "save_category":
     if ($name === "") fail("Category name is required");
     if ($id) run("UPDATE categories SET category_name=?, description=? WHERE category_id=?", "ssi", [$name, $desc, $id]);
     else     run("INSERT INTO categories (category_name, description) VALUES (?, ?)", "ss", [$name, $desc]);
+    audit("Category " . ($id ? "updated: " : "added: ") . $name);
     out(["ok" => true]);
 
 /* ====================== SUPPLIERS ====================== */
@@ -402,6 +476,7 @@ case "save_supplier":
                  "sssssssssi", [$name, $contact, $phone, $email, $address, $street, $brgy, $city, $prov, $id]);
     else     run("INSERT INTO suppliers (company_name, contact_person, phone, email, address, street, barangay, city, province) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                  "sssssssss", [$name, $contact, $phone, $email, $address, $street, $brgy, $city, $prov]);
+    audit("Supplier " . ($id ? "updated: " : "added: ") . $name);
     out(["ok" => true]);
 
 /* ====================== CUSTOMERS ====================== */
@@ -420,7 +495,10 @@ case "save_customer":
     } else {
         run("INSERT INTO customers (customer_name, phone, street, barangay, city, province) VALUES (?, ?, ?, ?, ?, ?)",
             "ssssss", [$name, $phone, $street, $brgy, $city, $prov]);
+        // auto-generated customer ID, e.g. CUST-0007 (names may repeat, IDs never do)
+        run("UPDATE customers SET customer_code = CONCAT('CUST-', LPAD(customer_id, 4, '0')), updated_at = updated_at WHERE customer_id = ?", "i", [$conn->insert_id]);
     }
+    audit("Customer " . ($id ? "updated: " : "added: ") . $name);
     out(["ok" => true]);
 
 /* ====================== EMPLOYEES (administrator only) ====================== */
@@ -433,6 +511,7 @@ case "save_employee":
     if ($name === "") fail("Full name is required");
     if ($phone !== null && !valid_ph_phone($phone)) fail("Enter a valid Philippine mobile number (09XXXXXXXXX)");
     if (!isset($ROLE_ID[$role])) fail("Invalid role");
+    $newUser = null;
     if ($id) {
         if ($id === $u["id"]) fail("Ask another administrator to edit your own record");
         $cur = rows("SELECT role_id FROM users WHERE user_id = ?", "i", [$id])[0] ?? null;
@@ -446,9 +525,11 @@ case "save_employee":
     } else {
         $pw = (string)($in["pw"] ?? "");
         if (strlen($pw) < 6) fail("Use at least 6 characters for the password");
-        make_user($name, $title, $role, $pw, $phone, "Active"); // new accounts start Active
+        $newId = make_user($name, $title, $role, $pw, $phone, "Active"); // new accounts start Active
+        $newUser = rows("SELECT username FROM users WHERE user_id = ?", "i", [$newId])[0]["username"] ?? null;
     }
-    out(["ok" => true]);
+    audit("Employee " . ($id ? "updated: " : "added: ") . $name);
+    out(["ok" => true, "username" => $newUser]);
 
 /* Employees are never deleted or archived. Their account is switched between
    Active and Inactive; Inactive accounts cannot sign in, history is preserved. */
@@ -459,12 +540,13 @@ case "set_employee_status":
     if ($id < 1) fail("Choose a valid employee");
     if (!in_array($status, ["Active", "Inactive"], true)) fail("Invalid status");
     if ($id === $u["id"]) fail("You cannot change the status of your own account here");
-    $cur = rows("SELECT role_id, status FROM users WHERE user_id = ?", "i", [$id])[0] ?? null;
+    $cur = rows("SELECT full_name, role_id, status FROM users WHERE user_id = ?", "i", [$id])[0] ?? null;
     if (!$cur) fail("Employee not found", 404);
     if ($cur["status"] === $status) out(["ok" => true, "status" => $status]); // nothing to change
     if ($status === "Inactive" && (int)$cur["role_id"] === 1 && other_active_admins($id) < 1)
         fail("You cannot deactivate the last active administrator");
     run("UPDATE users SET status = ? WHERE user_id = ?", "si", [$status, $id]);
+    audit("Employee " . ($status === "Active" ? "activated: " : "deactivated: ") . $cur["full_name"]);
     out(["ok" => true, "status" => $status]);
 
 /* ====================== STOCK MOVEMENTS ====================== */
@@ -474,9 +556,9 @@ case "add_movement":
     $type = ($in["type"] ?? "") === "OUT" ? "OUT" : "IN";
     $qty = (int)($in["qty"] ?? 0);
     $note = $str("note", 255);
-    if ($qty <= 0) fail("Quantity must be at least 1");
+    if ($qty <= 0 || $qty > 1000000) fail("Quantity must be between 1 and 1,000,000");
     $conn->begin_transaction();
-    $p = rows("SELECT stock_quantity, archived_at FROM products WHERE product_id = ? FOR UPDATE", "i", [$pid])[0] ?? null;
+    $p = rows("SELECT product_name, unit, stock_quantity, archived_at FROM products WHERE product_id = ? FOR UPDATE", "i", [$pid])[0] ?? null;
     if (!$p) fail("Product not found", 404);
     if ($p["archived_at"] !== null) fail("This product is archived. Restore it first", 409);
     if ($type === "OUT" && $qty > (int)$p["stock_quantity"]) fail("Only " . $p["stock_quantity"] . " on hand", 422);
@@ -485,15 +567,16 @@ case "add_movement":
     run("INSERT INTO inventory_movements (product_id, user_id, movement_type, quantity, remarks) VALUES (?, ?, ?, ?, ?)",
         "iisis", [$pid, $u["id"], $type, $qty, $note === "" ? null : $note]);
     $conn->commit();
+    audit(($type === "OUT" ? "Stock out: " : "Stock in: ") . $qty . " × " . $p["product_name"]);
     out(["ok" => true]);
 
 case "adjust_stock":
     $u = need("stock");
     $pid = (int)($in["pid"] ?? 0);
     $new = (int)($in["stock"] ?? -1);
-    if ($new < 0) fail("Counted quantity cannot be negative");
+    if ($new < 0 || $new > 2000000000) fail("Counted quantity must be between 0 and 2,000,000,000");
     $conn->begin_transaction();
-    $p = rows("SELECT stock_quantity, archived_at FROM products WHERE product_id = ? FOR UPDATE", "i", [$pid])[0] ?? null;
+    $p = rows("SELECT product_name, unit, stock_quantity, archived_at FROM products WHERE product_id = ? FOR UPDATE", "i", [$pid])[0] ?? null;
     if (!$p) fail("Product not found", 404);
     if ($p["archived_at"] !== null) fail("This product is archived. Restore it first", 409);
     $diff = $new - (int)$p["stock_quantity"];
@@ -503,26 +586,35 @@ case "adjust_stock":
             "iisi", [$pid, $u["id"], $diff > 0 ? "ADJ_IN" : "ADJ_OUT", abs($diff)]);
     }
     $conn->commit();
+    if ($diff != 0) audit("Quantity updated: " . $p["product_name"] . " now " . $new . " " . $p["unit"]);
     out(["ok" => true]);
 
 /* ====================== SALES ====================== */
 case "add_sale":
     $u = need("sell");
-    $cust = $str("cust", 120) ?: "Walk-in";
+    $custId = (int)($in["cust_id"] ?? 0);
+    $cust = "Walk-in"; $cid = null;
+    if ($custId > 0) { // registered customer chosen on the sale form
+        $c = rows("SELECT customer_name, archived_at FROM customers WHERE customer_id = ?", "i", [$custId])[0] ?? null;
+        if (!$c) fail("Customer not found", 404);
+        if ($c["archived_at"] !== null) fail("This customer is archived. Restore it first", 409);
+        $cust = $c["customer_name"]; $cid = $custId;
+    }
     $pid = (int)($in["pid"] ?? 0);
     $qty = (int)($in["qty"] ?? 0);
     $pay = $str("pay", 20);
     if (!in_array($pay, ["Cash", "GCash", "Maya", "Bank transfer", "Charge account"])) fail("Invalid payment method");
-    if ($qty <= 0) fail("Quantity must be at least 1");
+    if ($qty <= 0 || $qty > 1000000) fail("Quantity must be between 1 and 1,000,000");
     $conn->begin_transaction();
     $p = rows("SELECT unit_price, stock_quantity, archived_at FROM products WHERE product_id = ? FOR UPDATE", "i", [$pid])[0] ?? null;
     if (!$p) fail("Product not found", 404);
     if ($p["archived_at"] !== null) fail("This product is archived and cannot be sold", 409);
     if ($qty > (int)$p["stock_quantity"]) fail("Only " . $p["stock_quantity"] . " in stock", 422);
+    rows("SELECT GET_LOCK('sk_receipt', 5) g"); // two simultaneous sales must not get the same receipt number
     $n = (int)rows("SELECT COALESCE(MAX(CAST(SUBSTRING(receipt_number, 3) AS UNSIGNED)), 1000) + 1 AS n FROM sales")[0]["n"];
     $receipt = "S-" . $n;
-    run("INSERT INTO sales (receipt_number, user_id, customer_name, payment_method, total_amount) VALUES (?, ?, ?, ?, 0)",
-        "siss", [$receipt, $u["id"], $cust, $pay]);
+    run("INSERT INTO sales (receipt_number, user_id, customer_id, customer_name, payment_method, total_amount) VALUES (?, ?, ?, ?, ?, 0)",
+        "siiss", [$receipt, $u["id"], $cid, $cust, $pay]);
     $saleId = $conn->insert_id;
     run("INSERT INTO sale_items (sale_id, product_id, quantity, unit_price) VALUES (?, ?, ?, ?)",
         "iiid", [$saleId, $pid, $qty, $p["unit_price"]]);
@@ -531,6 +623,8 @@ case "add_sale":
     run("INSERT INTO inventory_movements (product_id, user_id, movement_type, quantity, remarks) VALUES (?, ?, 'OUT', ?, ?)",
         "iiis", [$pid, $u["id"], $qty, "Sale " . $receipt]);
     $conn->commit();
+    rows("SELECT RELEASE_LOCK('sk_receipt') r");
+    audit("Sale $receipt saved");
     out(["receipt" => $receipt]);
 
 /* ====================== MY ACCOUNT (any signed-in user) ====================== */
@@ -543,6 +637,7 @@ case "update_profile":
     if (!valid_ph_phone($phone)) fail("Enter a valid Philippine mobile number (09XXXXXXXXX)");
     run("UPDATE users SET full_name=?, job_title=?, email=?, phone=? WHERE user_id=?", "ssssi",
         [$name, $title === "" ? null : $title, $email, $phone, $u["id"]]);
+    audit("Profile updated");
     out(["ok" => true]);
 
 case "change_password":
@@ -553,10 +648,11 @@ case "change_password":
     $r = rows("SELECT password_hash FROM users WHERE user_id = ?", "i", [$u["id"]])[0] ?? null;
     if (!$r || !password_verify($cur, $r["password_hash"])) fail("Current password is incorrect", 403); // 403, not 401, so the app does not sign the user out
     run("UPDATE users SET password_hash = ? WHERE user_id = ?", "si", [password_hash($new, PASSWORD_BCRYPT), $u["id"]]);
+    audit("Password updated");
     session_regenerate_id(true);
     out(["ok" => true]);
 
-/* ====================== SETTINGS & LOGS ====================== */
+/* ====================== SETTINGS ====================== */
 case "save_settings":
     need("users");
     $store = $str("store", 100);
@@ -570,21 +666,7 @@ case "save_settings":
          ON DUPLICATE KEY UPDATE store_name = VALUES(store_name), tax_rate = VALUES(tax_rate),
          reorder_level = VALUES(reorder_level), receipt_footer = VALUES(receipt_footer)",
         "sdis", [$store, $tax, $reorder, $footer === "" ? null : $footer]);
-    out(["ok" => true]);
-
-case "log":
-    $u = need();
-    $text = $str("text", 500);
-    if ($text === "") out(["ok" => true]);
-    if (preg_match('/^Signed in/', $text))            $code = "LOGIN";
-    elseif (preg_match('/^Signed out/', $text))       $code = "LOGOUT";
-    elseif (preg_match('/^Sale/', $text))             $code = "SALE_CREATE";
-    elseif (preg_match('/^(Stock|Quantity)/', $text)) $code = "STOCK";
-    elseif (preg_match('/archived|restored/i', $text)) $code = "UPDATE"; // reuse an existing code so the activity_logs column accepts it
-    elseif (preg_match('/deleted/i', $text))          $code = "DELETE";
-    elseif (preg_match('/added/i', $text))            $code = "CREATE";
-    else                                              $code = "UPDATE";
-    run("INSERT INTO activity_logs (user_id, action, description) VALUES (?, ?, ?)", "iss", [$u["id"], $code, $text]);
+    audit("Settings saved");
     out(["ok" => true]);
 
 default:

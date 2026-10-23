@@ -1,62 +1,9 @@
--- =============================================================================
--- Stock Keeper · Inventory & Sales Management System
--- Database schema + seed data (MySQL 8.0+ / MariaDB 10.5+, InnoDB, utf8mb4)
--- Database name: stockkeeper_db  (must match $database in db.php)
--- WARNING: the DROP TABLE statement below only affects stockkeeper_db and
--- erases any existing Stock Keeper data. Run this file only on a new/empty
--- database or after taking a backup. PLEASE BASAHIN NG MAAYOS.
--- LOG#1 (FIXED NA PO): ERROR ENCOUNTERED, Table 'stockkeeper_db.settings' doesn't exist, but will be created by this script. FIX PLEASE.
--- =============================================================================
--- GENERAL SYSTEM RULE: every editable record tracks WHEN it was created and WHEN it was last updated.
---   created_at = set once by the database on INSERT.
---   updated_at = refreshed by the database on every UPDATE (edit, archive, restore, stock change).
---   Both are filled by MySQL itself, so no application code can forget to set them.
---   Ledger tables (inventory_movements, sales, sale_items, activity_logs) are never edited: their own
---   movement_date / sale_date / date_created column is the creation date.
---   Any NEW editable table (e.g. customers) must include created_at and updated_at the same way.
--- RECEIPT RULE: sale_items.product_name stores the product name at the time of sale, so renaming a product never changes old receipts.
--- HISTORY RULE: every edit, archive and restore of a business record is copied (old and new values) into record_history
---   by the triggers below, so the previous version of any record can always be looked up later.
---   Ledger tables (inventory_movements, sale_items, activity_logs, record_history) also refuse UPDATE.
--- GENERAL SYSTEM RULE: records are archived, never permanently deleted.
---   Archivable records (products, categories, suppliers, customers) carry archived_at: NULL = active, a date = archived.
---   Restoring sets archived_at back to NULL. Employees are switched Active/Inactive instead.
---   Sales, sale items and stock movements are permanent history and cannot be removed.
---   As a safety net the database itself refuses DELETE on these tables (see the triggers after the tables).
--- ALREADY HAVE DATA? Do not re-run this file. Instead run, once, per table:
---   ALTER TABLE categories ADD created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
---     ADD updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
---   (same for suppliers, products and settings; for users only: ADD updated_at TIMESTAMP NOT NULL
---    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;)
---   For settings (already has updated_at), add the creation date and back-fill it without touching updated_at:
---     ALTER TABLE settings ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER receipt_footer;
---     UPDATE settings SET created_at = updated_at, updated_at = updated_at WHERE setting_id = 1;
---   For the supplier address parts (street, barangay, city, province) on an existing database, run once:
---     ALTER TABLE suppliers
---       ADD COLUMN street   VARCHAR(120) NULL AFTER address,
---       ADD COLUMN barangay VARCHAR(80)  NULL AFTER street,
---       ADD COLUMN city     VARCHAR(80)  NULL AFTER barangay,
---       ADD COLUMN province VARCHAR(80)  NULL AFTER city;
---     then fill the parts of the six sample suppliers (updated_at = updated_at keeps their last-updated time):
---     UPDATE suppliers SET barangay='Real',          city='Calamba City',  province='Laguna',   updated_at=updated_at WHERE supplier_id=1;
---     UPDATE suppliers SET barangay='Pallocan West', city='Batangas City', province='Batangas', updated_at=updated_at WHERE supplier_id=2;
---     UPDATE suppliers SET barangay='Anabu II-A',    city='Imus City',     province='Cavite',   updated_at=updated_at WHERE supplier_id=3;
---     UPDATE suppliers SET street='MacArthur Highway', barangay='Karuhatan', city='Valenzuela City', province='Metro Manila', updated_at=updated_at WHERE supplier_id=4;
---     UPDATE suppliers SET barangay='Landayan',      city='San Pedro City', province='Laguna',  updated_at=updated_at WHERE supplier_id=5;
---     UPDATE suppliers SET barangay='Sabang',        city='Lipa City',     province='Batangas', updated_at=updated_at WHERE supplier_id=6;
---   For the customers feature on an existing database, run the CREATE TABLE customers block and the
---   trg_no_delete_customers trigger below, then:
---     ALTER TABLE sales ADD COLUMN customer_id INT UNSIGNED NULL AFTER user_id,
---       ADD KEY idx_sales_customer (customer_id),
---       ADD CONSTRAINT fk_sales_customer FOREIGN KEY (customer_id) REFERENCES customers (customer_id)
---         ON UPDATE CASCADE ON DELETE RESTRICT;
--- =============================================================================
 CREATE DATABASE IF NOT EXISTS stockkeeper_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE stockkeeper_db;
 
 SET FOREIGN_KEY_CHECKS = 0;
 DROP TABLE IF EXISTS record_history, settings, activity_logs, sale_items, sales, inventory_movements,
-                     products, customers, suppliers, categories, users, roles;
+                     product_suppliers, products, customers, suppliers, categories, users, roles;
 SET FOREIGN_KEY_CHECKS = 1;
 
 -- ROLES
@@ -128,7 +75,6 @@ CREATE TABLE products (
   sku             VARCHAR(30)       NOT NULL,
   product_name    VARCHAR(150)      NOT NULL,
   category_id     SMALLINT UNSIGNED NOT NULL,
-  supplier_id     SMALLINT UNSIGNED NOT NULL,
   unit_price      DECIMAL(10,2)     NOT NULL,
   stock_quantity  INT               NOT NULL DEFAULT 0,
   reorder_level   INT               NOT NULL DEFAULT 10,
@@ -140,14 +86,33 @@ CREATE TABLE products (
   CONSTRAINT uq_products_sku UNIQUE (sku),
   CONSTRAINT fk_products_category FOREIGN KEY (category_id) REFERENCES categories (category_id)
     ON UPDATE CASCADE ON DELETE RESTRICT,
-  CONSTRAINT fk_products_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers (supplier_id)
-    ON UPDATE CASCADE ON DELETE RESTRICT,
   CONSTRAINT chk_products_price CHECK (unit_price > 0),
   CONSTRAINT chk_products_stock CHECK (stock_quantity >= 0),
   CONSTRAINT chk_products_reorder CHECK (reorder_level >= 0),
   KEY idx_products_category (category_id),
-  KEY idx_products_supplier (supplier_id),
   KEY idx_products_name (product_name)
+) ENGINE=InnoDB;
+
+-- PRODUCT SUPPLIERS (many-to-many: a product can have several suppliers and a supplier can supply many products)
+-- is_primary marks the main supplier of a product. The generated column + UNIQUE key lets the database itself
+-- guarantee at most ONE main supplier per product. If the main supplier withdraws (is archived), the backend
+-- promotes another active supplier of that product to main.
+CREATE TABLE product_suppliers (
+  product_id   INT UNSIGNED      NOT NULL,
+  supplier_id  SMALLINT UNSIGNED NOT NULL,
+  is_primary   TINYINT(1)        NOT NULL DEFAULT 0,
+  primary_for  INT UNSIGNED GENERATED ALWAYS AS (IF(is_primary = 1, product_id, NULL)) STORED,
+  created_at   DATETIME          NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT pk_product_suppliers PRIMARY KEY (product_id, supplier_id),
+  CONSTRAINT uq_product_primary UNIQUE (primary_for),
+  -- RESTRICT (not CASCADE): MySQL/MariaDB do not allow cascading actions on the base column of a stored generated column.
+  -- Products are never deleted anyway (archive instead), so nothing is lost.
+  CONSTRAINT fk_ps_product FOREIGN KEY (product_id) REFERENCES products (product_id)
+    ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT fk_ps_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers (supplier_id)
+    ON UPDATE CASCADE ON DELETE RESTRICT,
+  CONSTRAINT chk_ps_primary CHECK (is_primary IN (0, 1)),
+  KEY idx_ps_supplier (supplier_id)
 ) ENGINE=InnoDB;
 
 -- INVENTORY MOVEMENTS
@@ -162,7 +127,7 @@ CREATE TABLE inventory_movements (
   CONSTRAINT pk_movements PRIMARY KEY (movement_id),
   -- A product's stock history is removed only together with the product (possible only if never sold).
   CONSTRAINT fk_movements_product FOREIGN KEY (product_id) REFERENCES products (product_id)
-    ON UPDATE CASCADE ON DELETE CASCADE,
+    ON UPDATE CASCADE ON DELETE RESTRICT,
   CONSTRAINT fk_movements_user FOREIGN KEY (user_id) REFERENCES users (user_id)
     ON UPDATE CASCADE ON DELETE RESTRICT,
   CONSTRAINT chk_movements_qty CHECK (quantity > 0),
@@ -174,6 +139,7 @@ CREATE TABLE inventory_movements (
 -- CUSTOMERS
 CREATE TABLE customers (
   customer_id    INT UNSIGNED  NOT NULL AUTO_INCREMENT,
+  customer_code  VARCHAR(16)   NULL,                  -- auto-generated customer ID (CUST-0001), set right after the insert; two customers may share a name, never an ID
   customer_name  VARCHAR(120)  NOT NULL,
   phone          VARCHAR(30)   NOT NULL,              -- mobile number
   street         VARCHAR(150)  NULL,                  -- street / building (optional)
@@ -184,6 +150,7 @@ CREATE TABLE customers (
   created_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,  -- set once when the record is created
   updated_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,  -- refreshed automatically on every change
   CONSTRAINT pk_customers PRIMARY KEY (customer_id),
+  CONSTRAINT uq_customers_code UNIQUE (customer_code),
   KEY idx_customers_name (customer_name),
   KEY idx_customers_area (province, city, barangay)
 ) ENGINE=InnoDB;
@@ -223,7 +190,7 @@ CREATE TABLE sale_items (
   CONSTRAINT pk_sale_items PRIMARY KEY (sale_item_id),
   CONSTRAINT uq_sale_items_line UNIQUE (sale_id, product_id),
   CONSTRAINT fk_sale_items_sale FOREIGN KEY (sale_id) REFERENCES sales (sale_id)
-    ON UPDATE CASCADE ON DELETE CASCADE,
+    ON UPDATE CASCADE ON DELETE RESTRICT,
   CONSTRAINT fk_sale_items_product FOREIGN KEY (product_id) REFERENCES products (product_id)
     ON UPDATE CASCADE ON DELETE RESTRICT,
   CONSTRAINT chk_sale_items_qty CHECK (quantity > 0),
@@ -240,7 +207,7 @@ CREATE TABLE activity_logs (
   date_created  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT pk_activity_logs PRIMARY KEY (log_id),
   CONSTRAINT fk_logs_user FOREIGN KEY (user_id) REFERENCES users (user_id)
-    ON UPDATE CASCADE ON DELETE SET NULL,
+    ON UPDATE CASCADE ON DELETE RESTRICT,
   KEY idx_logs_user (user_id),
   KEY idx_logs_date (date_created),
   KEY idx_logs_action (action)
@@ -322,11 +289,11 @@ CREATE TRIGGER trg_hist_products AFTER UPDATE ON products FOR EACH ROW
   SELECT 'products', OLD.product_id,
     CASE WHEN OLD.archived_at IS NULL AND NEW.archived_at IS NOT NULL THEN 'ARCHIVE'
          WHEN OLD.archived_at IS NOT NULL AND NEW.archived_at IS NULL THEN 'RESTORE' ELSE 'UPDATE' END,
-    JSON_OBJECT('sku', OLD.sku, 'product_name', OLD.product_name, 'category_id', OLD.category_id, 'supplier_id', OLD.supplier_id, 'unit_price', OLD.unit_price, 'reorder_level', OLD.reorder_level, 'unit', OLD.unit, 'archived_at', OLD.archived_at),
-    JSON_OBJECT('sku', NEW.sku, 'product_name', NEW.product_name, 'category_id', NEW.category_id, 'supplier_id', NEW.supplier_id, 'unit_price', NEW.unit_price, 'reorder_level', NEW.reorder_level, 'unit', NEW.unit, 'archived_at', NEW.archived_at),
+    JSON_OBJECT('sku', OLD.sku, 'product_name', OLD.product_name, 'category_id', OLD.category_id, 'unit_price', OLD.unit_price, 'reorder_level', OLD.reorder_level, 'unit', OLD.unit, 'archived_at', OLD.archived_at),
+    JSON_OBJECT('sku', NEW.sku, 'product_name', NEW.product_name, 'category_id', NEW.category_id, 'unit_price', NEW.unit_price, 'reorder_level', NEW.reorder_level, 'unit', NEW.unit, 'archived_at', NEW.archived_at),
     @app_user_id
   FROM DUAL
-  WHERE NOT (OLD.sku <=> NEW.sku AND OLD.product_name <=> NEW.product_name AND OLD.category_id <=> NEW.category_id AND OLD.supplier_id <=> NEW.supplier_id AND OLD.unit_price <=> NEW.unit_price AND OLD.reorder_level <=> NEW.reorder_level AND OLD.unit <=> NEW.unit AND OLD.archived_at <=> NEW.archived_at);
+  WHERE NOT (OLD.sku <=> NEW.sku AND OLD.product_name <=> NEW.product_name AND OLD.category_id <=> NEW.category_id AND OLD.unit_price <=> NEW.unit_price AND OLD.reorder_level <=> NEW.reorder_level AND OLD.unit <=> NEW.unit AND OLD.archived_at <=> NEW.archived_at);
 CREATE TRIGGER trg_hist_categories AFTER UPDATE ON categories FOR EACH ROW
   INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)
   SELECT 'categories', OLD.category_id,
@@ -421,23 +388,47 @@ INSERT INTO customers (customer_id, customer_name, phone, street, barangay, city
  (7,'Dra. Maricel Pangilinan','0918 205 4476','Mabini Street','Poblacion','Santa Rosa City','Laguna'),
  (8,'Beth Tolentino Residence','0966 813 2290',NULL,'Banlic','Cabuyao City','Laguna'),
  (9,'RPG Builders & Realty','0998 457 0135','Km 54, National Highway','Parian','Calamba City','Laguna');
+UPDATE customers SET customer_code = CONCAT('CUST-', LPAD(customer_id, 4, '0')), updated_at = updated_at;
 
-INSERT INTO products (product_id, sku, product_name, category_id, supplier_id, unit_price, stock_quantity, reorder_level, unit) VALUES
- (1,'CM-1001','Portland Cement 40 kg',1,1,265.00,520,80,'bag'),
- (2,'CM-1004','CHB 4" (100 mm)',1,1,14.00,1450,500,'pcs'),
- (3,'CM-1006','CHB 6" (150 mm)',1,1,19.00,380,500,'pcs'),
- (4,'CM-1010','Hollow Blocks 8"',1,1,26.00,0,200,'pcs'),
- (5,'ST-2001','Rebar 10 mm x 6 m',2,2,238.00,64,100,'pcs'),
- (6,'ST-2008','GI Wire #16',2,2,98.00,42,20,'kg'),
- (7,'LB-3002','Marine Plywood 3/4" 4x8',3,3,1650.00,26,15,'sheet'),
- (8,'LB-3010','Coco Lumber 2" x 3" x 10 ft',3,3,215.00,88,40,'pcs'),
- (9,'PL-4003','PVC Pipe 1/2" x 3 m',4,4,95.00,160,60,'pcs'),
- (10,'PL-4020','Gate Valve 3/4"',4,4,285.00,12,15,'pcs'),
- (11,'EL-5001','Electrical Wire THHN 2.0 mm² (150 m)',5,5,2850.00,14,6,'roll'),
- (12,'EL-5012','Circuit Breaker 20 A',5,5,295.00,40,15,'pcs'),
- (13,'PA-6001','Roof Sealant 4 L',6,6,780.00,11,12,'pail'),
- (14,'PA-6010','Latex Paint White 4 L',6,6,890.00,28,12,'can'),
- (15,'FS-7001','Concrete Nails 3"',7,2,85.00,38,50,'kg');
+INSERT INTO products (product_id, sku, product_name, category_id, unit_price, stock_quantity, reorder_level, unit) VALUES
+ (1,'CM-1001','Portland Cement 40 kg',1,265.00,520,80,'bag'),
+ (2,'CM-1004','CHB 4" (100 mm)',1,14.00,1450,500,'pcs'),
+ (3,'CM-1006','CHB 6" (150 mm)',1,19.00,380,500,'pcs'),
+ (4,'CM-1010','Hollow Blocks 8"',1,26.00,0,200,'pcs'),
+ (5,'ST-2001','Rebar 10 mm x 6 m',2,238.00,64,100,'pcs'),
+ (6,'ST-2008','GI Wire #16',2,98.00,42,20,'kg'),
+ (7,'LB-3002','Marine Plywood 3/4" 4x8',3,1650.00,26,15,'sheet'),
+ (8,'LB-3010','Coco Lumber 2" x 3" x 10 ft',3,215.00,88,40,'pcs'),
+ (9,'PL-4003','PVC Pipe 1/2" x 3 m',4,95.00,160,60,'pcs'),
+ (10,'PL-4020','Gate Valve 3/4"',4,285.00,12,15,'pcs'),
+ (11,'EL-5001','Electrical Wire THHN 2.0 mm² (150 m)',5,2850.00,14,6,'roll'),
+ (12,'EL-5012','Circuit Breaker 20 A',5,295.00,40,15,'pcs'),
+ (13,'PA-6001','Roof Sealant 4 L',6,780.00,11,12,'pail'),
+ (14,'PA-6010','Latex Paint White 4 L',6,890.00,28,12,'can'),
+ (15,'FS-7001','Concrete Nails 3"',7,85.00,38,50,'kg');
+
+-- Every product has one main supplier; a few also have a backup supplier (sample data)
+INSERT INTO product_suppliers (product_id, supplier_id, is_primary) VALUES
+ (1,1,1),
+ (2,1,1),
+ (3,1,1),
+ (4,1,1),
+ (5,2,1),
+ (6,2,1),
+ (7,3,1),
+ (8,3,1),
+ (9,4,1),
+ (10,4,1),
+ (11,5,1),
+ (12,5,1),
+ (13,6,1),
+ (14,6,1),
+ (15,2,1),
+ (5,1,0),
+ (6,5,0),
+ (9,5,0),
+ (13,3,0),
+ (14,3,0);
 
 INSERT INTO inventory_movements (movement_id, product_id, user_id, movement_type, quantity, remarks, movement_date) VALUES
  (1, 1,3,'IN', 200,'PO-2210 · Calamba Cement & Masonry Depot','2026-10-10 08:30:00'),
@@ -479,13 +470,7 @@ INSERT INTO sale_items (sale_id, product_id, quantity, unit_price) VALUES
 
 -- sales.total_amount is derived from the line items (subtotal is a generated column)
 UPDATE sales s SET s.total_amount = (SELECT SUM(si.subtotal) FROM sale_items si WHERE si.sale_id = s.sale_id);
--- Keep historical records: block hard deletes at the database level
-ALTER TABLE inventory_movements DROP FOREIGN KEY fk_movements_product,
-  ADD CONSTRAINT fk_movements_product FOREIGN KEY (product_id) REFERENCES products (product_id) ON UPDATE CASCADE ON DELETE RESTRICT;
-ALTER TABLE sale_items DROP FOREIGN KEY fk_sale_items_sale,
-  ADD CONSTRAINT fk_sale_items_sale FOREIGN KEY (sale_id) REFERENCES sales (sale_id) ON UPDATE CASCADE ON DELETE RESTRICT;
-ALTER TABLE activity_logs DROP FOREIGN KEY fk_logs_user,
-  ADD CONSTRAINT fk_logs_user FOREIGN KEY (user_id) REFERENCES users (user_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+-- (Foreign keys already use ON DELETE RESTRICT in the CREATE TABLE statements above.)
 
 -- every sold line also appears in the stock ledger as an OUT movement (INSERT ... SELECT)
 INSERT INTO inventory_movements (product_id, user_id, movement_type, quantity, remarks, movement_date)
@@ -553,11 +538,11 @@ CREATE TRIGGER trg_hist_products AFTER UPDATE ON products FOR EACH ROW
   SELECT 'products', OLD.product_id,
     CASE WHEN OLD.archived_at IS NULL AND NEW.archived_at IS NOT NULL THEN 'ARCHIVE'
          WHEN OLD.archived_at IS NOT NULL AND NEW.archived_at IS NULL THEN 'RESTORE' ELSE 'UPDATE' END,
-    JSON_OBJECT('sku', OLD.sku, 'product_name', OLD.product_name, 'category_id', OLD.category_id, 'supplier_id', OLD.supplier_id, 'unit_price', OLD.unit_price, 'reorder_level', OLD.reorder_level, 'unit', OLD.unit, 'archived_at', OLD.archived_at),
-    JSON_OBJECT('sku', NEW.sku, 'product_name', NEW.product_name, 'category_id', NEW.category_id, 'supplier_id', NEW.supplier_id, 'unit_price', NEW.unit_price, 'reorder_level', NEW.reorder_level, 'unit', NEW.unit, 'archived_at', NEW.archived_at),
+    JSON_OBJECT('sku', OLD.sku, 'product_name', OLD.product_name, 'category_id', OLD.category_id, 'unit_price', OLD.unit_price, 'reorder_level', OLD.reorder_level, 'unit', OLD.unit, 'archived_at', OLD.archived_at),
+    JSON_OBJECT('sku', NEW.sku, 'product_name', NEW.product_name, 'category_id', NEW.category_id, 'unit_price', NEW.unit_price, 'reorder_level', NEW.reorder_level, 'unit', NEW.unit, 'archived_at', NEW.archived_at),
     @app_user_id
   FROM DUAL
-  WHERE NOT (OLD.sku <=> NEW.sku AND OLD.product_name <=> NEW.product_name AND OLD.category_id <=> NEW.category_id AND OLD.supplier_id <=> NEW.supplier_id AND OLD.unit_price <=> NEW.unit_price AND OLD.reorder_level <=> NEW.reorder_level AND OLD.unit <=> NEW.unit AND OLD.archived_at <=> NEW.archived_at);
+  WHERE NOT (OLD.sku <=> NEW.sku AND OLD.product_name <=> NEW.product_name AND OLD.category_id <=> NEW.category_id AND OLD.unit_price <=> NEW.unit_price AND OLD.reorder_level <=> NEW.reorder_level AND OLD.unit <=> NEW.unit AND OLD.archived_at <=> NEW.archived_at);
 DROP TRIGGER IF EXISTS trg_hist_categories;
 CREATE TRIGGER trg_hist_categories AFTER UPDATE ON categories FOR EACH ROW
   INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)

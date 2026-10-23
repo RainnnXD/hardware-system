@@ -65,6 +65,16 @@ const db = {
   set: { store: "Stock Keeper", tax: 12, reorder: 20, footer: "" },
 };
 const P = (id) => db.prod.find((p) => p.id === id) || {};
+/* active products that would be left with no active supplier if supplier sid withdrew */
+const stuckProducts = (sid) =>
+  db.prod.filter(
+    (p) =>
+      !p.arch &&
+      (p.sups || []).includes(sid) &&
+      !(p.sups || []).some(
+        (x) => x !== sid && !(db.sup.find((s) => s.id === x) || {}).arch,
+      ),
+  );
 const total = (s) => s.items.reduce((a, i) => a + i.qty * i.price, 0);
 const nm = (l, id) => (db[l].find((x) => x.id === id) || { name: "—" }).name;
 
@@ -194,19 +204,30 @@ function ask(msg, fn, label) {
 const EMAIL_RE =
   /^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/;
 const PH_RE = /^09\d{9}$/; /* 09XXXXXXXXX, exactly 11 digits */
+const LAND_RE = /^(09\d{9}|0[2-8]\d{7,9})$/; /* mobile or landline (suppliers) */
 function openForm(title, fs, vals, save) {
   const ph = (f) => (f.ph ? ` placeholder="${e(f.ph)}"` : "");
-  dlg.innerHTML = `<form novalidate><h3>${title}</h3>${fs.map((f) => `<label>${f.l}${f.t == "select" ? `<select name="${f.n}">${f.ph ? `<option value="" disabled selected hidden>${e(f.ph)}</option>` : ""}${f.o.map((o) => `<option value="${o[0]}">${e(o[1])}</option>`).join("")}</select>` : f.t == "password" ? `<span class="pw"><input name="${f.n}" type="password"${ph(f)}>${PWBTN}</span>` : `<input name="${f.n}" type="${f.t || "text"}"${f.ro ? " readonly" : ""}${f.t == "number" ? ` min="${f.min ?? 0}" step="${f.step || 1}"` : ""}>`}${f.h ? `<small class="hint">${f.h}</small>` : ""}<small class="er"></small></label>`).join("")}<div class="ft"><button type="button" class="b" data-x>Cancel</button><button class="b p">Save</button></div></form>`;
+  dlg.innerHTML = `<form novalidate><h3>${title}</h3>${fs.map((f) => `<label>${f.l}${f.t == "multi" ? `<select name="${f.n}" multiple size="${Math.min(5, f.o.length || 1)}">${f.o.map((o) => `<option value="${o[0]}">${e(o[1])}</option>`).join("")}</select>` : f.t == "select" ? `<select name="${f.n}">${f.ph ? `<option value="" disabled selected hidden>${e(f.ph)}</option>` : ""}${f.o.map((o) => `<option value="${o[0]}">${e(o[1])}</option>`).join("")}</select>` : f.t == "password" ? `<span class="pw"><input name="${f.n}" type="password"${ph(f)}>${PWBTN}</span>` : `<input name="${f.n}" type="${f.t || "text"}"${f.ro ? " readonly" : ""}${f.t == "number" ? ` min="${f.min ?? 0}" step="${f.step || 1}"` : ""}>`}${f.h ? `<small class="hint">${f.h}</small>` : ""}<small class="er"></small></label>`).join("")}<div class="ft"><button type="button" class="b" data-x>Cancel</button><button class="b p">Save</button></div></form>`;
   const fm = dlg.querySelector("form");
   fs.forEach((f) => {
     let v = vals[f.n];
     if (v === undefined) return;
     if (f.t == "tel") v = v == "—" ? "" : String(v).replace(/[\s()-]/g, "");
+    if (f.t == "multi") {
+      [...fm.elements[f.n].options].forEach(
+        (o) => (o.selected = v.map(String).includes(o.value)),
+      );
+      return;
+    }
     fm.elements[f.n].value = v;
   });
   const read = () => {
     const d = {};
     fs.forEach((f) => {
+      if (f.t == "multi") {
+        d[f.n] = [...fm.elements[f.n].selectedOptions].map((o) => +o.value);
+        return;
+      }
       const x = fm.elements[f.n].value.trim();
       d[f.n] = f.t == "number" || f.num ? (x === "" ? NaN : +x) : x;
     });
@@ -232,8 +253,10 @@ function openForm(title, fs, vals, save) {
       m = "Enter a whole number";
     else if (!empty && f.t == "email" && !EMAIL_RE.test(x))
       m = "Enter a valid email address (e.g. name@example.com)";
-    else if (!empty && f.t == "tel" && !PH_RE.test(x))
-      m = "Enter an 11-digit mobile number starting with 09 (09XXXXXXXXX)";
+    else if (!empty && f.t == "tel" && !(f.land ? LAND_RE : PH_RE).test(x))
+      m = f.land
+        ? "Enter a mobile (09XXXXXXXXX) or landline number (e.g. 028XXXXXXX)"
+        : "Enter an 11-digit mobile number starting with 09 (09XXXXXXXXX)";
     else if (!empty && f.v) m = f.v(x, d) || "";
     lab(f).classList.toggle("e", !!m);
     lab(f).querySelector(".er").textContent = m;
@@ -266,7 +289,7 @@ function openForm(title, fs, vals, save) {
     touched.add(f.n);
     revalidate();
   });
-  fm.onsubmit = (ev) => {
+  fm.onsubmit = async (ev) => {
     ev.preventDefault();
     const d = read();
     let first = null;
@@ -279,8 +302,16 @@ function openForm(title, fs, vals, save) {
       if (!el.readOnly) el.focus();
       return toast("Fix the highlighted fields", "bad");
     }
-    dlg.close();
-    save(d);
+    /* keep the form open if saving fails, so nothing typed is lost */
+    const btn = fm.querySelector("button.p");
+    btn.disabled = true;
+    let ok;
+    try {
+      ok = await save(d);
+    } finally {
+      btn.disabled = false;
+    }
+    if (ok !== false) dlg.close();
   };
   dlg.showModal();
 }
@@ -330,10 +361,18 @@ const S = {
       },
       {
         n: "sup",
-        l: "Supplier",
+        l: "Main supplier",
         t: "select",
         num: 1,
         ph: "Select a supplier",
+        o: actv("sup").map((c) => [c.id, c.name]),
+      },
+      {
+        n: "sups",
+        l: "Other suppliers (optional)",
+        t: "multi",
+        opt: 1,
+        h: "Backup suppliers for this product. Hold Ctrl (Cmd on Mac) to pick more than one.",
         o: actv("sup").map((c) => [c.id, c.name]),
       },
       {
@@ -380,17 +419,24 @@ const S = {
       { n: "brgy", l: "Barangay", ph: "e.g. Real" },
       { n: "city", l: "City / Municipality", ph: "e.g. Calamba City" },
       { n: "prov", l: "Province", ph: "e.g. Laguna" },
-      { n: "phone", l: "Phone", t: "tel", ph: "09XXXXXXXXX" },
-      { n: "email", l: "Email", t: "email", ph: "name@company.com" },
+      { n: "phone", l: "Phone", t: "tel", land: 1, ph: "09XXXXXXXXX or 028XXXXXXX" },
+      { n: "email", l: "Email (optional)", t: "email", opt: 1, ph: "name@company.com" },
     ],
   },
   cust: {
     k: "cust",
     t: "Customer",
     f: () => [
+      {
+        n: "code",
+        l: "Customer ID",
+        ro: 1,
+        opt: 1,
+        h: '<span class="auto">*</span> Auto-generated. It cannot be edited.',
+      },
       { n: "name", l: "Customer name", ph: "e.g. Maria Santos" },
       { n: "phone", l: "Mobile number", t: "tel", ph: "09XXXXXXXXX" },
-      { n: "street", l: "Street / building (optional)", ph: "e.g. 12 Rizal St." },
+      { n: "street", l: "Street / building (optional)", opt: 1, ph: "e.g. 12 Rizal St." },
       { n: "brgy", l: "Barangay", ph: "e.g. Banay-banay" },
       { n: "city", l: "City / Municipality", ph: "e.g. Cabuyao" },
       { n: "prov", l: "Province", ph: "e.g. Laguna" },
@@ -413,9 +459,15 @@ function edit(s, id) {
     it = id
       ? db[c.k].find((x) => x.id === id)
       : s == "prod"
-        ? { min: db.set.reorder }
+        ? { min: db.set.reorder, stock: 0 }
         : {};
   const fs = c.f();
+  if (s == "prod" && !can("stock")) {
+    const sf = fs.find((f) => f.n == "stock");
+    sf.ro = 1;
+    sf.opt = 1;
+    sf.h = "Only inventory staff can change quantities.";
+  }
   if (s == "emp" && !id)
     fs.push({
       n: "pw",
@@ -424,12 +476,23 @@ function edit(s, id) {
       ph: "At least 6 characters",
       v: (x) => (x.length < 6 ? "Use at least 6 characters" : ""),
     });
-  openForm((id ? "Edit " : "Add ") + c.t.toLowerCase(), fs, it, async (d) => {
+  const vals =
+    s == "prod" && id
+      ? { ...it, sups: (it.sups || []).filter((x) => x !== it.sup) } // "other" suppliers = all except the main one
+      : s == "cust" && !id
+        ? { code: "Assigned when you save" }
+        : it;
+  openForm((id ? "Edit " : "Add ") + c.t.toLowerCase(), fs, vals, async (d) => {
     const j = await api("save_" + API[s], { ...d, id });
-    if (!j) return;
+    if (!j) return false;
     await load();
     show(cur);
-    toast(c.t + (id ? " updated: " : " added: ") + d.name);
+    toast(
+      c.t +
+        (id ? " updated: " : " added: ") +
+        d.name +
+        (j.username ? ". Username: " + j.username : ""),
+    );
   });
   if (s == "prod" && !id)
     dlg.querySelector('[name="cat"]').onchange = (ev) =>
@@ -443,8 +506,12 @@ function archive(s, id) {
   const why =
     s == "cat" && actv("prod").some((p) => p.cat === id)
       ? "Archive or move the active products in this category first"
-      : s == "sup" && actv("prod").some((p) => p.sup === id)
-        ? "Archive or move the active products from this supplier first"
+      : s == "sup" && stuckProducts(id).length
+        ? "Add another supplier to these products first: " +
+          stuckProducts(id)
+            .slice(0, 3)
+            .map((p) => p.name)
+            .join(", ")
         : "";
   if (why) return toast(why, "bad");
   const note =
@@ -551,7 +618,7 @@ function mk(id, type, labels, data, label) {
 const saleCols = [
   ["Receipt", (s) => `<b>${s.id}</b>`, "m"],
   ["Date", (s) => s.date, "m"],
-  ["Customer", (s) => e(s.cust)],
+  ["Customer", (s) => e(s.cust) + (s.cid ? `<div class="mu2">${e(s.cid)}</div>` : "")],
   ["Lines", (s) => s.items.length],
   ["Cashier", (s) => e(s.by || "—")],
   ["Payment", (s) => e(s.pay)],
@@ -598,7 +665,14 @@ function rProd() {
         (p) =>
           `<span class="cd" data-st="--c:${cc(p.cat)}"></span>${e(nm("cats", p.cat))}`,
       ],
-      ["Supplier", (p) => e(nm("sup", p.sup))],
+      [
+        "Supplier",
+        (p) =>
+          e(nm("sup", p.sup)) +
+          ((p.sups || []).length > 1
+            ? `<div class="mu2">+${p.sups.length - 1} more</div>`
+            : ""),
+      ],
       ["Price", (p) => money(p.price), "m"],
       ["Stock level", (p) => stk(p)],
       ["Status", (p) => bdg(p)],
@@ -652,7 +726,11 @@ function rSup() {
       ["Email", (s) => e(s.email)],
       [
         "Products",
-        (s) => actv("prod").filter((p) => p.sup === s.id).length,
+        (s) => {
+          const l = actv("prod").filter((p) => (p.sups || []).includes(s.id));
+          const m = l.filter((p) => p.sup === s.id).length;
+          return l.length + (m ? `<div class="mu2">${m} as main</div>` : "");
+        },
         "m",
       ],
       ["", (s) => acts("sup", s.id), "act"],
@@ -667,6 +745,7 @@ function rCust() {
   tbl(
     "#cutbl",
     [
+      ["Customer ID", (c) => e(c.code || "—"), "m"],
       ["Customer", (c) => `<b>${e(c.name)}</b>${archTag(c)}`],
       ["Mobile", (c) => e(c.phone), "m"],
       [
@@ -680,7 +759,7 @@ function rCust() {
     db.cust
       .filter(arf("#cua"))
       .filter((c) =>
-        (c.name + " " + c.brgy + " " + c.city).toLowerCase().includes(q),
+        (c.code + " " + c.name + " " + c.brgy + " " + c.city).toLowerCase().includes(q),
       ),
     archEmpty("#cua", "customers") || "No customers yet.",
     archRow,
@@ -724,7 +803,7 @@ function rSales() {
   tbl(
     "#stbl2",
     saleCols,
-    db.sales.filter((s) => (s.id + s.cust).toLowerCase().includes(q)).reverse(),
+    db.sales.filter((s) => (s.id + s.cust + (s.cid || "")).toLowerCase().includes(q)).reverse(),
     "No sales match your search.",
   );
 }
@@ -754,7 +833,7 @@ function rRep() {
   const day = {},
     pay = {};
   db.sales.forEach((s) => {
-    const d = s.date.slice(5, 10);
+    const d = s.date.slice(0, 10);
     day[d] = (day[d] || 0) + total(s);
     pay[s.pay] = pay[s.pay] || [0, 0];
     pay[s.pay][0]++;
@@ -763,7 +842,7 @@ function rRep() {
   mk(
     "c3",
     "bar",
-    Object.keys(day),
+    Object.keys(day).map(fd),
     Object.values(day).map((v) => Math.round(v)),
     "Revenue (₱)",
   );
@@ -825,7 +904,7 @@ function mvForm(type) {
           note: d.note,
         }))
       )
-        return;
+        return false;
       await load();
       show(cur);
       toast(`${out ? "Stock out" : "Stock in"}: ${d.qty} × ${P(d.pid).name}`);
@@ -838,7 +917,13 @@ function newSale() {
   openForm(
     "New sale",
     [
-      { n: "cust", l: "Customer", ph: "e.g. Walk-in or customer name" },
+      {
+        n: "cust",
+        l: "Customer",
+        t: "select",
+        num: 1,
+        o: [[0, "Walk-in"], ...actv("cust").map((c) => [c.id, `${c.code} · ${c.name} (${c.brgy}, ${c.city})`])],
+      },
       {
         n: "pid",
         l: "Product",
@@ -872,12 +957,12 @@ function newSale() {
     {},
     async (d) => {
       const j = await api("add_sale", {
-        cust: d.cust,
+        cust_id: d.cust,
         pid: d.pid,
         qty: d.qty,
         pay: d.pay,
       });
-      if (!j) return;
+      if (!j) return false;
       await load();
       show(cur);
       toast("Sale " + j.receipt + " saved");
@@ -886,7 +971,7 @@ function newSale() {
 }
 function saleInfo(id) {
   const s = db.sales.find((x) => x.id == id);
-  dlg.innerHTML = `<h3>Receipt ${s.id}</h3><p class="mu" data-st="margin:0 0 12px">${s.date} · ${e(s.cust)} · ${e(s.pay)}</p><div class="tw"><table><thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Subtotal</th></tr></thead><tbody>${s.items.map((i) => `<tr><td>${e(i.name || P(i.pid).name || "—")}</td><td class="m">${i.qty}</td><td class="m">${money(i.price)}</td><td class="m">${money(i.qty * i.price)}</td></tr>`).join("")}</tbody></table></div><h3 data-st="margin-top:14px">Total ${money(total(s))}</h3><p class="mu" data-st="margin:4px 0 0">Includes ${db.set.tax}% VAT: ${money((total(s) * db.set.tax) / (100 + db.set.tax))} · Cashier: ${e(s.by || "—")}</p><div class="ft"><button class="b p" data-x>Close</button></div>`;
+  dlg.innerHTML = `<h3>Receipt ${s.id}</h3><p class="mu" data-st="margin:0 0 12px">${s.date} · ${e(s.cust)}${s.cid ? " (" + e(s.cid) + ")" : ""} · ${e(s.pay)}</p><div class="tw"><table><thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Subtotal</th></tr></thead><tbody>${s.items.map((i) => `<tr><td>${e(i.name || P(i.pid).name || "—")}</td><td class="m">${i.qty}</td><td class="m">${money(i.price)}</td><td class="m">${money(i.qty * i.price)}</td></tr>`).join("")}</tbody></table></div><h3 data-st="margin-top:14px">Total ${money(total(s))}</h3><p class="mu" data-st="margin:4px 0 0">Includes ${db.set.tax}% VAT: ${money((total(s) * db.set.tax) / (100 + db.set.tax))} · Cashier: ${e(s.by || "—")}</p><div class="ft"><button class="b p" data-x>Close</button></div>`;
   dlg.showModal();
 }
 
@@ -973,7 +1058,7 @@ S.emp = {
   t: "Employee",
   f: () => [
     { n: "name", l: "Full name", ph: "e.g. Maria Santos" },
-    { n: "title", l: "Position", ph: "e.g. Cashier" },
+    { n: "title", l: "Position", opt: 1, ph: "e.g. Cashier" },
     {
       n: "role",
       l: "Role",
@@ -981,14 +1066,10 @@ S.emp = {
       ph: "Select a role",
       o: Object.entries(ROLE),
     },
-    { n: "phone", l: "Phone", t: "tel", ph: "09XXXXXXXXX" },
+    { n: "phone", l: "Phone", t: "tel", opt: 1, ph: "09XXXXXXXXX" },
   ],
 };
-function log(a) {
-  if (!me) return;
-  db.logs.push({ t: now(), u: me.name, r: me.role, a });
-  api("log", { text: a }, true); // saved to activity_logs
-}
+function log() {} /* activity logs are written by api.php, not by the browser */
 // Sidebar is grouped and filtered by role
 const GRP = {
     dashboard: 0,
@@ -1090,14 +1171,14 @@ function signUp() {
         role: d.role,
         password: d.pw,
       });
-      if (!j) return;
+      if (!j) return false;
       await initLogin();
       $("#lu").value = j.username || "";
       $("#lp").focus();
       toast(
         "Account created. Your username is " +
           j.username +
-          ". Sign in to continue.",
+          ". An administrator must activate your account before you can sign in.",
       );
     },
   );
@@ -1105,13 +1186,16 @@ function signUp() {
 const prodActs = (id) =>
   acts("prod", id) +
   " " +
-  `<button class="b s stk" data-a="adj" data-id="${id}">Adjust stock</button>`;
+  (P(id).arch
+    ? ""
+    : `<button class="b s stk" data-a="adj" data-id="${id}">Adjust stock</button>`);
 function rEmp() {
   const q = $("#eq").value.toLowerCase();
   tbl(
     "#etbl",
     [
       ["Name", (u) => `<div class="pn">${av(u.name)}<b>${e(u.name)}</b></div>`],
+      ["Username", (u) => e(u.username), "m"],
       ["Position", (u) => e(u.title)],
       [
         "Role",
@@ -1135,6 +1219,14 @@ function rEmp() {
     "No employees match your filter.",
     (u) => (u.status == "Inactive" ? "arch" : ""),
   );
+  $("#roles").innerHTML =
+    "<h3>Role responsibilities</h3>" +
+    Object.keys(ROLE)
+      .map(
+        (k) =>
+          `<p class="mu flush"><b>${ROLE[k]}</b><br>${e(DUTY[k][0])}<br>${e(DUTY[k][1])}</p>`,
+      )
+      .join("");
 }
 function rLogs() {
   const q = $("#lq").value.toLowerCase();
@@ -1248,15 +1340,29 @@ function rHist(q) {
 }
 /* SETTINGS = the signed-in employee's own details (name, position, email, phone, password) */
 function rSet() {
-  $("#setv").innerHTML = `<table><tbody>${[
-    ["Full name", me.name],
-    ["Position", me.title || "—"],
-    ["Email", me.email || "—"],
-    ["Mobile number", me.phone || "—"],
-    ["Password", "••••••••"],
-  ]
-    .map((r) => `<tr><td><b>${r[0]}</b></td><td>${e(r[1])}</td></tr>`)
-    .join("")}</tbody></table>`;
+  const row = (r) => `<tr><td><b>${r[0]}</b></td><td>${e(r[1])}</td></tr>`;
+  $("#setv").innerHTML =
+    `<table><tbody>${[
+      ["Full name", me.name],
+      ["Position", me.title || "—"],
+      ["Email", me.email || "—"],
+      ["Mobile number", me.phone || "—"],
+      ["Password", "••••••••"],
+    ]
+      .map(row)
+      .join("")}</tbody></table>` +
+    (ADM()
+      ? `<h3 data-st="margin:18px 0 8px">Store settings</h3><table><tbody>${[
+          ["Store name", db.set.store],
+          ["Tax rate", db.set.tax + "%"],
+          ["Default reorder level", db.set.reorder],
+          ["Receipt footer", db.set.footer || "—"],
+        ]
+          .map(row)
+          .join(
+            "",
+          )}</tbody></table><div class="bar bar-flush"><button class="b" data-a="set">Edit store settings</button></div>`
+      : "");
 }
 function rProfile() {
   $("#profv").innerHTML =
@@ -1282,7 +1388,7 @@ function editMyInfo() {
     ],
     { name: me.name, title: me.title, email: me.email, phone: me.phone },
     async (d) => {
-      if (!(await api("update_profile", d))) return;
+      if (!(await api("update_profile", d))) return false;
       await load();
       setRole();
       show(cur);
@@ -1318,7 +1424,7 @@ function changeMyPw() {
     {},
     async (d) => {
       if (!(await api("change_password", { current: d.cur, password: d.pw })))
-        return;
+        return false;
       toast("Password updated");
     },
   );
@@ -1337,7 +1443,7 @@ function setForm() {
     ],
     db.set,
     async (d) => {
-      if (!(await api("save_settings", d))) return;
+      if (!(await api("save_settings", d))) return false;
       await load();
       applySet();
       show(cur);
@@ -1367,7 +1473,7 @@ function adjust(id) {
     { stock: p.stock },
     async (d) => {
       if (d.stock === p.stock) return toast("Quantity unchanged");
-      if (!(await api("adjust_stock", { pid: id, stock: d.stock }))) return;
+      if (!(await api("adjust_stock", { pid: id, stock: d.stock }))) return false;
       await load();
       show(cur);
       toast(`Quantity updated: ${p.name} now ${d.stock} ${p.unit}`);
@@ -1385,22 +1491,6 @@ const notes = () => [
       t: (p.stock ? "Low stock: " : "Out of stock: ") + p.name,
       s: `${p.stock} ${p.unit} left, reorder level ${p.min}`,
     })),
-  ...(ADM()
-    ? [
-        {
-          id: "inv1",
-          v: "suppliers",
-          t: "Supplier invoice due",
-          s: "Batangas Steel Trading Corp., due in 3 days",
-        },
-        {
-          id: "po1",
-          v: "movements",
-          t: "Delivery expected",
-          s: "Calamba Cement & Masonry Depot, PO-2226",
-        },
-      ]
-    : []),
 ]; // TODO: GET /api/notifications
 function badge() {
   const n = notes().filter((x) => !seen.has(x.id)).length;
@@ -1527,7 +1617,6 @@ async function deactivateSelf() {
 async function signOut() {
   if (!confirm("Are you sure you want to log out?")) return;
 
-  await api("log", { text: "Signed out" }, true);
   await api("logout", {}, true);
   me = null;
   Object.assign(db, {
@@ -1661,7 +1750,7 @@ const stc = (p) =>
         ? ["Overstock", "ov", "#3B82F6"]
         : ["In stock", "", "#10B981"];
 const pb = (p) =>
-  `<div class="pb"><i class="${stc(p)[1]}" data-st="width:${Math.min(100, Math.round((p.stock / (p.min * 3)) * 100))}%"></i></div>`;
+  `<div class="pb"><i class="${stc(p)[1]}" data-st="width:${Math.min(100, Math.round((p.stock / (p.min * 3 || p.stock || 1)) * 100))}%"></i></div>`;
 const stk = (p) =>
   `<div data-st="min-width:110px"><b>${p.stock}</b> <span class="mu2">${e(p.unit)}</span>${pb(p)}</div>`;
 const bdg = (p) =>
@@ -1770,7 +1859,7 @@ function rHome() {
     low = PR.filter((p) => p.stock <= p.min),
     out = PR.filter((p) => !p.stock).length,
     ok = PR.length - low.length,
-    hs = Math.round((ok / PR.length) * 100);
+    hs = PR.length ? Math.round((ok / PR.length) * 100) : 0;
   const rev = db.sales.reduce((a, s) => a + total(s), 0),
     val = PR.reduce((a, p) => a + p.stock * p.price, 0),
     rs = low.reduce(
@@ -1855,7 +1944,7 @@ function rHome() {
 <div class="s5 w">${wh("Needs restocking", "Lowest stock first", "products")}${
     low.length
       ? low
-          .sort((a, b) => a.stock / a.min - b.stock / b.min)
+          .sort((a, b) => a.stock / (a.min || 1) - b.stock / (b.min || 1))
           .slice(0, 5)
           .map(
             (p) =>
