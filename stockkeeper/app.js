@@ -75,6 +75,20 @@ const stuckProducts = (sid) =>
         (x) => x !== sid && !(db.sup.find((s) => s.id === x) || {}).arch,
       ),
   );
+/* active products that would be left with no active category if category cid were archived */
+const stuckByCat = (cid) =>
+  db.prod.filter(
+    (p) =>
+      !p.arch &&
+      (p.cats || []).includes(cid) &&
+      !(p.cats || []).some(
+        (x) => x !== cid && !(db.cats.find((c) => c.id === x) || {}).arch,
+      ),
+  );
+/* names of every category of a product, main category first */
+const catNames = (p) => (p.cats || []).map((id) => nm("cats", id));
+/* role keys -> readable labels, e.g. ["manager","inventory"] -> "Manager, Inventory staff" */
+const rl = (keys) => (keys || []).map((k) => ROLE[k] || k).join(", ");
 const total = (s) => s.items.reduce((a, i) => a + i.qty * i.price, 0);
 const nm = (l, id) => (db[l].find((x) => x.id === id) || { name: "—" }).name;
 
@@ -225,7 +239,9 @@ function openForm(title, fs, vals, save) {
     const d = {};
     fs.forEach((f) => {
       if (f.t == "multi") {
-        d[f.n] = [...fm.elements[f.n].selectedOptions].map((o) => +o.value);
+        d[f.n] = [...fm.elements[f.n].selectedOptions].map((o) =>
+          f.str ? o.value : +o.value,
+        );
         return;
       }
       const x = fm.elements[f.n].value.trim();
@@ -348,15 +364,23 @@ const S = {
         l: 'SKU <span class="auto" title="Auto-generated">*</span>',
         ro: 1,
         opt: 1,
-        h: '<span class="auto">*</span> Auto-generated from the category. It cannot be edited.',
+        h: '<span class="auto">*</span> Auto-generated from the main category. It cannot be edited.',
       },
       { n: "name", l: "Product name", ph: "e.g. Portland Cement 40 kg" },
       {
         n: "cat",
-        l: "Category",
+        l: "Main category",
         t: "select",
         num: 1,
         ph: "Select a category",
+        o: actv("cats").map((c) => [c.id, c.name]),
+      },
+      {
+        n: "cats",
+        l: "Other categories (optional)",
+        t: "multi",
+        opt: 1,
+        h: "A product can belong to several categories. Hold Ctrl (Cmd on Mac) to pick more than one.",
         o: actv("cats").map((c) => [c.id, c.name]),
       },
       {
@@ -478,7 +502,11 @@ function edit(s, id) {
     });
   const vals =
     s == "prod" && id
-      ? { ...it, sups: (it.sups || []).filter((x) => x !== it.sup) } // "other" suppliers = all except the main one
+      ? {
+          ...it,
+          sups: (it.sups || []).filter((x) => x !== it.sup), // "other" suppliers = all except the main one
+          cats: (it.cats || []).filter((x) => x !== it.cat), // "other" categories = all except the main one
+        }
       : s == "cust" && !id
         ? { code: "Assigned when you save" }
         : it;
@@ -504,8 +532,12 @@ function archive(s, id) {
   const c = S[s],
     it = db[c.k].find((x) => x.id === id);
   const why =
-    s == "cat" && actv("prod").some((p) => p.cat === id)
-      ? "Archive or move the active products in this category first"
+    s == "cat" && stuckByCat(id).length
+      ? "Add another category to these products first: " +
+        stuckByCat(id)
+          .slice(0, 3)
+          .map((p) => p.name)
+          .join(", ")
       : s == "sup" && stuckProducts(id).length
         ? "Add another supplier to these products first: " +
           stuckProducts(id)
@@ -543,8 +575,9 @@ function setEmpStatus(id, status) {
     );
   if (
     status == "Inactive" &&
-    it.role == "admin" &&
-    db.emp.filter((u) => u.role == "admin" && u.status == "Active").length < 2
+    (it.roles || []).includes("admin") &&
+    db.emp.filter((u) => (u.roles || []).includes("admin") && u.status == "Active")
+      .length < 2
   )
     return toast("You cannot deactivate the last active administrator", "bad");
   const go = async () => {
@@ -647,7 +680,7 @@ function rProd() {
     c = +sel.value;
   const rows = db.prod.filter(
     (p) =>
-      (!c || p.cat === c) &&
+      (!c || (p.cats || []).includes(c)) &&
       arf("#pa")(p) &&
       (p.name + p.sku).toLowerCase().includes(q),
   );
@@ -663,7 +696,10 @@ function rProd() {
       [
         "Category",
         (p) =>
-          `<span class="cd" data-st="--c:${cc(p.cat)}"></span>${e(nm("cats", p.cat))}`,
+          `<span class="cd" data-st="--c:${cc(p.cat)}"></span>${e(nm("cats", p.cat))}` +
+          ((p.cats || []).length > 1
+            ? `<div class="mu2">Also: ${e(catNames(p).slice(1).join(", "))}</div>`
+            : ""),
       ],
       [
         "Supplier",
@@ -692,7 +728,7 @@ function rCat() {
       ["Description", (c) => e(c.desc || "")],
       [
         "Products",
-        (c) => actv("prod").filter((p) => p.cat === c.id).length,
+        (c) => actv("prod").filter((p) => (p.cats || []).includes(c.id)).length,
         "m",
       ],
       ["Added / updated", dts],
@@ -816,7 +852,7 @@ function rRep() {
     [
       ["SKU", (p) => e(p.sku), "m"],
       ["Product", (p) => e(p.name)],
-      ["Category", (p) => e(nm("cats", p.cat))],
+      ["Category", (p) => e(catNames(p).join(", ") || "—")],
       ["On hand", (p) => p.stock, "m"],
       ["Reorder at", (p) => p.min, "m"],
       ["Value", (p) => money(p.stock * p.price), "m"],
@@ -1043,15 +1079,15 @@ const DUTY = {
     "Cannot change products, stock or suppliers, and cannot see reports or employees.",
   ],
 };
-const can = (k) => !!me && CAN[k].includes(me.role);
+/* An employee can hold several roles; permissions are the union of all of them. */
+const can = (k) => !!me && (me.roles || []).some((r) => CAN[k].includes(r));
 let me = null;
-const ADM = () => me && me.role == "admin";
+const ADM = () => me && (me.roles || []).includes("admin");
 // PERMISSION MAP, USED TO FILTER WHAT ROLES CAN DO CERTAIN THINGS
 const allowed = (v) =>
   v == "profile" ||
   v == "settings" ||
-  !VIEWS[me.role] ||
-  VIEWS[me.role].includes(v);
+  (me.roles || []).some((r) => !VIEWS[r] || VIEWS[r].includes(v));
 const deny = () => toast("Permission denied: your role cannot do this", "bad");
 S.emp = {
   k: "emp",
@@ -1060,11 +1096,13 @@ S.emp = {
     { n: "name", l: "Full name", ph: "e.g. Maria Santos" },
     { n: "title", l: "Position", opt: 1, ph: "e.g. Cashier" },
     {
-      n: "role",
-      l: "Role",
-      t: "select",
-      ph: "Select a role",
+      n: "roles",
+      l: "Roles",
+      t: "multi",
+      str: 1,
+      h: "An employee can hold several roles and gets the permissions of all of them. Hold Ctrl (Cmd on Mac) to pick more than one.",
       o: Object.entries(ROLE),
+      v: (x) => (x.length ? "" : "Choose at least one role"),
     },
     { n: "phone", l: "Phone", t: "tel", opt: 1, ph: "09XXXXXXXXX" },
   ],
@@ -1118,7 +1156,7 @@ function setRole() {
     .slice(
       0,
       2,
-    )}</span><div><b>${e(me.name)}</b><small>${ROLE[me.role]}</small></div>`;
+    )}</span><div><b>${e(me.name)}</b><small>${e(rl(me.roles))}</small></div>`;
   document.body.className = [
     !can("manage") && "nm",
     !can("stock") && "ns",
@@ -1198,9 +1236,14 @@ function rEmp() {
       ["Username", (u) => e(u.username), "m"],
       ["Position", (u) => e(u.title)],
       [
-        "Role",
+        "Roles",
         (u) =>
-          `<span class="tg ${u.role == "admin" ? "ok" : ""}">${ROLE[u.role]}</span>`,
+          (u.roles || [])
+            .map(
+              (k) =>
+                `<span class="tg ${k == "admin" ? "ok" : ""}">${e(ROLE[k] || k)}</span>`,
+            )
+            .join(" ") || "—",
       ],
       ["Phone", (u) => e(u.phone), "m"],
       [
@@ -1214,7 +1257,7 @@ function rEmp() {
     db.emp.filter(
       (u) =>
         (!$("#ea").value || u.status == $("#ea").value) &&
-        (u.name + u.title).toLowerCase().includes(q),
+        (u.name + u.title + rl(u.roles)).toLowerCase().includes(q),
     ),
     "No employees match your filter.",
     (u) => (u.status == "Inactive" ? "arch" : ""),
@@ -1248,6 +1291,8 @@ const HF = {
   sku: "SKU",
   product_name: "Name",
   category_id: "Category",
+  categories: "Categories",
+  roles: "Roles",
   supplier_id: "Supplier",
   unit_price: "Unit price",
   reorder_level: "Reorder level",
@@ -1274,9 +1319,11 @@ const HF = {
   receipt_footer: "Receipt footer",
 };
 const hv = (k, v) =>
-  v === null || v === "" || v === undefined
+  v === null || v === "" || v === undefined || (Array.isArray(v) && !v.length)
     ? "—"
-    : k == "category_id"
+    : Array.isArray(v)
+      ? v.join(", ")
+      : k == "category_id"
       ? nm("cats", +v)
       : k == "supplier_id"
         ? nm("sup", +v)
@@ -1287,7 +1334,8 @@ const hdiff = (h) =>
   Object.keys(h.new)
     .filter(
       (k) =>
-        h.old[k] !== h.new[k] && !(k == "archived_at" && h.type != "UPDATE"),
+        JSON.stringify(h.old[k]) !== JSON.stringify(h.new[k]) &&
+        !(k == "archived_at" && h.type != "UPDATE"),
     )
     .map((k) => [HF[k] || k, hv(k, h.old[k]), hv(k, h.new[k])]);
 function rHist(q) {
@@ -1366,11 +1414,11 @@ function rSet() {
 }
 function rProfile() {
   $("#profv").innerHTML =
-    `<div class="pn" data-st="margin-bottom:14px">${av(me.name)}<div><b>${e(me.name)}</b><div class="mu2">${e(me.title || "—")} · ${ROLE[me.role]}</div></div></div><table><tbody>${[
+    `<div class="pn" data-st="margin-bottom:14px">${av(me.name)}<div><b>${e(me.name)}</b><div class="mu2">${e(me.title || "—")} · ${e(rl(me.roles))}</div></div></div><table><tbody>${[
       ["Username", me.username],
       ["Email", me.email || "—"],
       ["Mobile number", me.phone || "—"],
-      ["Role", ROLE[me.role]],
+      [(me.roles || []).length > 1 ? "Roles" : "Role", rl(me.roles)],
       ["Account created", me.cr || "—"],
       ["Last updated", me.up || "—"],
     ]
@@ -1934,7 +1982,7 @@ function rHome() {
   const mv = db.mov.slice(-6).reverse(),
     lg = db.logs.slice(-7).reverse();
   $("#dash").innerHTML = `<div class="dg">
-<div class="hr"><div><div class="eb">${new Date().toLocaleDateString("en-PH", { weekday: "long", month: "long", day: "numeric" })}</div><h2>${gr}, ${e(fn)}!</h2><div class="rl">${ROLE[me.role]} · Stock Keeper</div><p data-st="margin-top:12px">${low.length ? `<b>${low.length} item${low.length > 1 ? "s" : ""}</b> need restocking${out ? `, ${out} already out of stock` : ""}. ` : "All stock levels are healthy. "}${tx} sales logged so far, worth ${money(rev)}.</p><div class="hq">${qa.map((a, i) => `<button class="hb${i ? "" : " o"}" ${a[1]}><span class="ms">${a[2]}</span>${a[3]}</button>`).join("")}</div></div>
+<div class="hr"><div><div class="eb">${new Date().toLocaleDateString("en-PH", { weekday: "long", month: "long", day: "numeric" })}</div><h2>${gr}, ${e(fn)}!</h2><div class="rl">${e(rl(me.roles))} · Stock Keeper</div><p data-st="margin-top:12px">${low.length ? `<b>${low.length} item${low.length > 1 ? "s" : ""}</b> need restocking${out ? `, ${out} already out of stock` : ""}. ` : "All stock levels are healthy. "}${tx} sales logged so far, worth ${money(rev)}.</p><div class="hq">${qa.map((a, i) => `<button class="hb${i ? "" : " o"}" ${a[1]}><span class="ms">${a[2]}</span>${a[3]}</button>`).join("")}</div></div>
 <div class="rv"><div class="eb">Revenue · last 7 days</div><b data-n="${wk}" data-f="m">0</b><div class="rvs"><span class="dl ${dl < 0 ? "dn" : ""}"><span class="ms">${dl < 0 ? "trending_down" : "trending_up"}</span>${Math.abs(dl)}%</span><span>Latest day ${money(ld)} vs daily avg</span></div>${dv.length > 1 ? `<svg viewBox="0 0 260 72" preserveAspectRatio="none" width="100%" height="72"><defs><linearGradient id="sg" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#FBBF24" stop-opacity=".45"/><stop offset="1" stop-color="#FBBF24" stop-opacity="0"/></linearGradient></defs><path d="${pth} L260 72 L0 72Z" fill="url(#sg)"/><path d="${pth}" fill="none" stroke="#FBBF24" stroke-width="2.5" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>` : ""}</div></div>
 <div class="s4 tile" data-st="background:linear-gradient(135deg,#1E4FBF,#3B82F6)"><div class="t1"><span class="ms">warehouse</span>Inventory value</div><b data-n="${val}" data-f="m">0</b><div class="t2">${PR.length} products across ${actv("cats").length} categories</div><div class="sb">${cv.map((c) => `<i title="${e(c[0].name)}" data-st="flex:${c[1] || 1};background:${cc(c[0].id)}"></i>`).join("")}</div></div>
 <div class="s4 tile" data-st="background:linear-gradient(135deg,#C2410C,#F59E0B)"><div class="t1"><span class="ms">warning</span>Needs restocking</div><b data-n="${low.length}">0</b><div class="t2">Est. restock cost ${money(rs)}</div><button class="hb" data-v="products" data-st="margin-top:14px">Review items</button></div>

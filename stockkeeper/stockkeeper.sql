@@ -3,7 +3,7 @@ USE stockkeeper_db;
 
 SET FOREIGN_KEY_CHECKS = 0;
 DROP TABLE IF EXISTS record_history, settings, activity_logs, sale_items, sales, inventory_movements,
-                     product_suppliers, products, customers, suppliers, categories, users, roles;
+                     product_suppliers, product_categories, products, customers, suppliers, categories, user_roles, users, roles;
 SET FOREIGN_KEY_CHECKS = 1;
 
 -- ROLES
@@ -21,7 +21,6 @@ CREATE TABLE users (
   username       VARCHAR(40)      NOT NULL,
   email          VARCHAR(120)     NOT NULL,
   password_hash  VARCHAR(255)     NOT NULL,           -- output of PHP password_hash(); never a plain password
-  role_id        TINYINT UNSIGNED NOT NULL,
   job_title      VARCHAR(80)      NULL,
   phone          VARCHAR(30)      NULL,
   status         ENUM('Active','Inactive') NOT NULL DEFAULT 'Active',
@@ -31,11 +30,22 @@ CREATE TABLE users (
   CONSTRAINT pk_users PRIMARY KEY (user_id),
   CONSTRAINT uq_users_username UNIQUE (username),
   CONSTRAINT uq_users_email    UNIQUE (email),
-  CONSTRAINT fk_users_role FOREIGN KEY (role_id) REFERENCES roles (role_id)
-    ON UPDATE CASCADE ON DELETE RESTRICT,
   -- Defence in depth: the database itself refuses short/readable values such as 'Password123'.
-  CONSTRAINT chk_users_hash CHECK (CHAR_LENGTH(password_hash) >= 60 AND password_hash LIKE '$%'),
-  KEY idx_users_role (role_id)
+  CONSTRAINT chk_users_hash CHECK (CHAR_LENGTH(password_hash) >= 60 AND password_hash LIKE '$%')
+) ENGINE=InnoDB;
+
+-- USER ROLES (many-to-many: an employee can hold several roles and a role can be held by many employees)
+-- An employee's permissions are the UNION of all roles they hold. Every employee keeps at least one role (enforced by api.php).
+CREATE TABLE user_roles (
+  user_id      INT UNSIGNED     NOT NULL,
+  role_id      TINYINT UNSIGNED NOT NULL,
+  assigned_at  DATETIME         NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT pk_user_roles PRIMARY KEY (user_id, role_id),
+  CONSTRAINT fk_ur_user FOREIGN KEY (user_id) REFERENCES users (user_id)
+    ON UPDATE CASCADE ON DELETE RESTRICT,
+  CONSTRAINT fk_ur_role FOREIGN KEY (role_id) REFERENCES roles (role_id)
+    ON UPDATE CASCADE ON DELETE RESTRICT,
+  KEY idx_ur_role (role_id)
 ) ENGINE=InnoDB;
 
 -- CATEGORIES
@@ -74,7 +84,6 @@ CREATE TABLE products (
   product_id      INT UNSIGNED      NOT NULL AUTO_INCREMENT,
   sku             VARCHAR(30)       NOT NULL,
   product_name    VARCHAR(150)      NOT NULL,
-  category_id     SMALLINT UNSIGNED NOT NULL,
   unit_price      DECIMAL(10,2)     NOT NULL,
   stock_quantity  INT               NOT NULL DEFAULT 0,
   reorder_level   INT               NOT NULL DEFAULT 10,
@@ -84,13 +93,31 @@ CREATE TABLE products (
   updated_at     DATETIME          NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,  -- refreshed automatically on every change
   CONSTRAINT pk_products PRIMARY KEY (product_id),
   CONSTRAINT uq_products_sku UNIQUE (sku),
-  CONSTRAINT fk_products_category FOREIGN KEY (category_id) REFERENCES categories (category_id)
-    ON UPDATE CASCADE ON DELETE RESTRICT,
   CONSTRAINT chk_products_price CHECK (unit_price > 0),
   CONSTRAINT chk_products_stock CHECK (stock_quantity >= 0),
   CONSTRAINT chk_products_reorder CHECK (reorder_level >= 0),
-  KEY idx_products_category (category_id),
   KEY idx_products_name (product_name)
+) ENGINE=InnoDB;
+
+-- PRODUCT CATEGORIES (many-to-many: a product can belong to several categories and a category holds many products)
+-- is_primary marks the MAIN category of a product (used for the SKU prefix, the colour/icon and per-category totals, so
+-- nothing is counted twice). Same pattern as product_suppliers: the generated column + UNIQUE key lets the database
+-- guarantee at most ONE main category per product. If the main category is archived, the backend promotes another active one.
+CREATE TABLE product_categories (
+  product_id   INT UNSIGNED      NOT NULL,
+  category_id  SMALLINT UNSIGNED NOT NULL,
+  is_primary   TINYINT(1)        NOT NULL DEFAULT 0,
+  primary_for  INT UNSIGNED GENERATED ALWAYS AS (IF(is_primary = 1, product_id, NULL)) STORED,
+  created_at   DATETIME          NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT pk_product_categories PRIMARY KEY (product_id, category_id),
+  CONSTRAINT uq_product_main_category UNIQUE (primary_for),
+  -- RESTRICT on the product side: MySQL/MariaDB do not allow cascading actions on the base column of a stored generated column.
+  CONSTRAINT fk_pc_product FOREIGN KEY (product_id) REFERENCES products (product_id)
+    ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT fk_pc_category FOREIGN KEY (category_id) REFERENCES categories (category_id)
+    ON UPDATE CASCADE ON DELETE RESTRICT,
+  CONSTRAINT chk_pc_primary CHECK (is_primary IN (0, 1)),
+  KEY idx_pc_category (category_id)
 ) ENGINE=InnoDB;
 
 -- PRODUCT SUPPLIERS (many-to-many: a product can have several suppliers and a supplier can supply many products)
@@ -289,11 +316,11 @@ CREATE TRIGGER trg_hist_products AFTER UPDATE ON products FOR EACH ROW
   SELECT 'products', OLD.product_id,
     CASE WHEN OLD.archived_at IS NULL AND NEW.archived_at IS NOT NULL THEN 'ARCHIVE'
          WHEN OLD.archived_at IS NOT NULL AND NEW.archived_at IS NULL THEN 'RESTORE' ELSE 'UPDATE' END,
-    JSON_OBJECT('sku', OLD.sku, 'product_name', OLD.product_name, 'category_id', OLD.category_id, 'unit_price', OLD.unit_price, 'reorder_level', OLD.reorder_level, 'unit', OLD.unit, 'archived_at', OLD.archived_at),
-    JSON_OBJECT('sku', NEW.sku, 'product_name', NEW.product_name, 'category_id', NEW.category_id, 'unit_price', NEW.unit_price, 'reorder_level', NEW.reorder_level, 'unit', NEW.unit, 'archived_at', NEW.archived_at),
+    JSON_OBJECT('sku', OLD.sku, 'product_name', OLD.product_name, 'unit_price', OLD.unit_price, 'reorder_level', OLD.reorder_level, 'unit', OLD.unit, 'archived_at', OLD.archived_at),
+    JSON_OBJECT('sku', NEW.sku, 'product_name', NEW.product_name, 'unit_price', NEW.unit_price, 'reorder_level', NEW.reorder_level, 'unit', NEW.unit, 'archived_at', NEW.archived_at),
     @app_user_id
   FROM DUAL
-  WHERE NOT (OLD.sku <=> NEW.sku AND OLD.product_name <=> NEW.product_name AND OLD.category_id <=> NEW.category_id AND OLD.unit_price <=> NEW.unit_price AND OLD.reorder_level <=> NEW.reorder_level AND OLD.unit <=> NEW.unit AND OLD.archived_at <=> NEW.archived_at);
+  WHERE NOT (OLD.sku <=> NEW.sku AND OLD.product_name <=> NEW.product_name AND OLD.unit_price <=> NEW.unit_price AND OLD.reorder_level <=> NEW.reorder_level AND OLD.unit <=> NEW.unit AND OLD.archived_at <=> NEW.archived_at);
 CREATE TRIGGER trg_hist_categories AFTER UPDATE ON categories FOR EACH ROW
   INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)
   SELECT 'categories', OLD.category_id,
@@ -328,11 +355,11 @@ CREATE TRIGGER trg_hist_users AFTER UPDATE ON users FOR EACH ROW
   INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)
   SELECT 'users', OLD.user_id,
     'UPDATE',
-    JSON_OBJECT('full_name', OLD.full_name, 'username', OLD.username, 'email', OLD.email, 'role_id', OLD.role_id, 'job_title', OLD.job_title, 'phone', OLD.phone, 'status', OLD.status),
-    JSON_OBJECT('full_name', NEW.full_name, 'username', NEW.username, 'email', NEW.email, 'role_id', NEW.role_id, 'job_title', NEW.job_title, 'phone', NEW.phone, 'status', NEW.status),
+    JSON_OBJECT('full_name', OLD.full_name, 'username', OLD.username, 'email', OLD.email, 'job_title', OLD.job_title, 'phone', OLD.phone, 'status', OLD.status),
+    JSON_OBJECT('full_name', NEW.full_name, 'username', NEW.username, 'email', NEW.email, 'job_title', NEW.job_title, 'phone', NEW.phone, 'status', NEW.status),
     @app_user_id
   FROM DUAL
-  WHERE NOT (OLD.full_name <=> NEW.full_name AND OLD.username <=> NEW.username AND OLD.email <=> NEW.email AND OLD.role_id <=> NEW.role_id AND OLD.job_title <=> NEW.job_title AND OLD.phone <=> NEW.phone AND OLD.status <=> NEW.status);
+  WHERE NOT (OLD.full_name <=> NEW.full_name AND OLD.username <=> NEW.username AND OLD.email <=> NEW.email AND OLD.job_title <=> NEW.job_title AND OLD.phone <=> NEW.phone AND OLD.status <=> NEW.status);
 CREATE TRIGGER trg_hist_settings AFTER UPDATE ON settings FOR EACH ROW
   INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)
   SELECT 'settings', OLD.setting_id,
@@ -353,13 +380,18 @@ CREATE TRIGGER trg_hist_settings AFTER UPDATE ON settings FOR EACH ROW
 INSERT INTO roles (role_id, role_name) VALUES
  (1,'Administrator'),(2,'Manager'),(3,'Inventory Staff'),(4,'Cashier');
 
-INSERT INTO users (user_id, full_name, username, email, password_hash, role_id, job_title, phone, status) VALUES
- (1,'Criselle Enraca','criselle.enraca','criselle.enraca@stockkeeper.example','$2y$10$9kND5iDmUj2sQt4mpGbcp.3MVphroXbZjMWhncGPYudMs4u5g0m1m',1,'Owner & General Manager','0917 301 5521','Active'),
- (2,'Zosaine Manaig','zosaine.manaig','zosaine.manaig@stockkeeper.example','$2y$10$Q.C0nRR1QseoyYOgwG7XBehtNqWgAXCV5Vyi4y/urzGwoee9CVLRG',2,'Operations Manager','0928 440 7316','Active'),
- (3,'Rainzell Espaldon','rainzell.espaldon','rainzell.espaldon@stockkeeper.example','$2y$10$J5e1pFZ5ZgGjPqxgYRVPJe9YVSgkMioht5CK6nCGPFOMlIR.wJRuq',3,'Warehouse Supervisor','0939 215 8840','Active'),
- (4,'Althea Aquino','althea.aquino','althea.aquino@stockkeeper.example','$2y$10$jRQJfPm/rtcdyTxNGjuDQuIR4h0oX5ojNRqbG.pfi3agDM6zGaA9K',4,'Head Cashier','0966 702 1193','Active'),
- (5,'Andrei Reyes','andrei.reyes','andrei.reyes@stockkeeper.example','$2y$10$ca95.VNFSo1PDhokfVmIou7/GX.Rh8uxFUr.5MiNFClsNHzcbrAza',3,'Stockroom Assistant','0905 118 6672','Active'),
- (6,'Jhan Vincent Miraples','jhanvincent.miraples','jhanvincent.miraples@stockkeeper.example','$2y$10$QFBvsiurazpkxdfYfNs0Luz87GDOHcsUNAErNPTMFS1XYoFJwfYAG',4,'Sales Associate','0977 836 2204','Active');
+INSERT INTO users (user_id, full_name, username, email, password_hash, job_title, phone, status) VALUES
+ (1,'Criselle Enraca','criselle.enraca','criselle.enraca@stockkeeper.example','$2y$10$9kND5iDmUj2sQt4mpGbcp.3MVphroXbZjMWhncGPYudMs4u5g0m1m','Owner & General Manager','0917 301 5521','Active'),
+ (2,'Zosaine Manaig','zosaine.manaig','zosaine.manaig@stockkeeper.example','$2y$10$Q.C0nRR1QseoyYOgwG7XBehtNqWgAXCV5Vyi4y/urzGwoee9CVLRG','Operations Manager','0928 440 7316','Active'),
+ (3,'Rainzell Espaldon','rainzell.espaldon','rainzell.espaldon@stockkeeper.example','$2y$10$J5e1pFZ5ZgGjPqxgYRVPJe9YVSgkMioht5CK6nCGPFOMlIR.wJRuq','Warehouse Supervisor','0939 215 8840','Active'),
+ (4,'Althea Aquino','althea.aquino','althea.aquino@stockkeeper.example','$2y$10$jRQJfPm/rtcdyTxNGjuDQuIR4h0oX5ojNRqbG.pfi3agDM6zGaA9K','Head Cashier','0966 702 1193','Active'),
+ (5,'Andrei Reyes','andrei.reyes','andrei.reyes@stockkeeper.example','$2y$10$ca95.VNFSo1PDhokfVmIou7/GX.Rh8uxFUr.5MiNFClsNHzcbrAza','Stockroom Assistant','0905 118 6672','Active'),
+ (6,'Jhan Vincent Miraples','jhanvincent.miraples','jhanvincent.miraples@stockkeeper.example','$2y$10$QFBvsiurazpkxdfYfNs0Luz87GDOHcsUNAErNPTMFS1XYoFJwfYAG','Sales Associate','0977 836 2204','Active');
+
+-- Every employee has at least one role. Sample data: Zosaine (Manager) also works as Inventory Staff,
+-- and Althea (Cashier) also helps with stock.
+INSERT INTO user_roles (user_id, role_id) VALUES
+ (1,1),(2,2),(3,3),(4,4),(5,3),(6,4),(2,3),(4,3);
 
 INSERT INTO categories (category_id, category_name, description) VALUES
  (1,'Cement & Masonry','Portland cement, CHB, hollow blocks'),
@@ -390,22 +422,46 @@ INSERT INTO customers (customer_id, customer_name, phone, street, barangay, city
  (9,'RPG Builders & Realty','0998 457 0135','Km 54, National Highway','Parian','Calamba City','Laguna');
 UPDATE customers SET customer_code = CONCAT('CUST-', LPAD(customer_id, 4, '0')), updated_at = updated_at;
 
-INSERT INTO products (product_id, sku, product_name, category_id, unit_price, stock_quantity, reorder_level, unit) VALUES
- (1,'CM-1001','Portland Cement 40 kg',1,265.00,520,80,'bag'),
- (2,'CM-1004','CHB 4" (100 mm)',1,14.00,1450,500,'pcs'),
- (3,'CM-1006','CHB 6" (150 mm)',1,19.00,380,500,'pcs'),
- (4,'CM-1010','Hollow Blocks 8"',1,26.00,0,200,'pcs'),
- (5,'ST-2001','Rebar 10 mm x 6 m',2,238.00,64,100,'pcs'),
- (6,'ST-2008','GI Wire #16',2,98.00,42,20,'kg'),
- (7,'LB-3002','Marine Plywood 3/4" 4x8',3,1650.00,26,15,'sheet'),
- (8,'LB-3010','Coco Lumber 2" x 3" x 10 ft',3,215.00,88,40,'pcs'),
- (9,'PL-4003','PVC Pipe 1/2" x 3 m',4,95.00,160,60,'pcs'),
- (10,'PL-4020','Gate Valve 3/4"',4,285.00,12,15,'pcs'),
- (11,'EL-5001','Electrical Wire THHN 2.0 mm² (150 m)',5,2850.00,14,6,'roll'),
- (12,'EL-5012','Circuit Breaker 20 A',5,295.00,40,15,'pcs'),
- (13,'PA-6001','Roof Sealant 4 L',6,780.00,11,12,'pail'),
- (14,'PA-6010','Latex Paint White 4 L',6,890.00,28,12,'can'),
- (15,'FS-7001','Concrete Nails 3"',7,85.00,38,50,'kg');
+INSERT INTO products (product_id, sku, product_name, unit_price, stock_quantity, reorder_level, unit) VALUES
+ (1,'CM-1001','Portland Cement 40 kg',265.00,520,80,'bag'),
+ (2,'CM-1004','CHB 4" (100 mm)',14.00,1450,500,'pcs'),
+ (3,'CM-1006','CHB 6" (150 mm)',19.00,380,500,'pcs'),
+ (4,'CM-1010','Hollow Blocks 8"',26.00,0,200,'pcs'),
+ (5,'ST-2001','Rebar 10 mm x 6 m',238.00,64,100,'pcs'),
+ (6,'ST-2008','GI Wire #16',98.00,42,20,'kg'),
+ (7,'LB-3002','Marine Plywood 3/4" 4x8',1650.00,26,15,'sheet'),
+ (8,'LB-3010','Coco Lumber 2" x 3" x 10 ft',215.00,88,40,'pcs'),
+ (9,'PL-4003','PVC Pipe 1/2" x 3 m',95.00,160,60,'pcs'),
+ (10,'PL-4020','Gate Valve 3/4"',285.00,12,15,'pcs'),
+ (11,'EL-5001','Electrical Wire THHN 2.0 mm² (150 m)',2850.00,14,6,'roll'),
+ (12,'EL-5012','Circuit Breaker 20 A',295.00,40,15,'pcs'),
+ (13,'PA-6001','Roof Sealant 4 L',780.00,11,12,'pail'),
+ (14,'PA-6010','Latex Paint White 4 L',890.00,28,12,'can'),
+ (15,'FS-7001','Concrete Nails 3"',85.00,38,50,'kg');
+
+-- Every product has one main category; a few are also listed under a second category (sample data)
+INSERT INTO product_categories (product_id, category_id, is_primary) VALUES
+ (1,1,1),
+ (2,1,1),
+ (3,1,1),
+ (4,1,1),
+ (5,2,1),
+ (6,2,1),
+ (7,3,1),
+ (8,3,1),
+ (9,4,1),
+ (10,4,1),
+ (11,5,1),
+ (12,5,1),
+ (13,6,1),
+ (14,6,1),
+ (15,7,1),
+ (5,7,0),
+ (6,7,0),
+ (9,5,0),
+ (13,4,0),
+ (14,3,0),
+ (15,2,0);
 
 -- Every product has one main supplier; a few also have a backup supplier (sample data)
 INSERT INTO product_suppliers (product_id, supplier_id, is_primary) VALUES
@@ -538,11 +594,11 @@ CREATE TRIGGER trg_hist_products AFTER UPDATE ON products FOR EACH ROW
   SELECT 'products', OLD.product_id,
     CASE WHEN OLD.archived_at IS NULL AND NEW.archived_at IS NOT NULL THEN 'ARCHIVE'
          WHEN OLD.archived_at IS NOT NULL AND NEW.archived_at IS NULL THEN 'RESTORE' ELSE 'UPDATE' END,
-    JSON_OBJECT('sku', OLD.sku, 'product_name', OLD.product_name, 'category_id', OLD.category_id, 'unit_price', OLD.unit_price, 'reorder_level', OLD.reorder_level, 'unit', OLD.unit, 'archived_at', OLD.archived_at),
-    JSON_OBJECT('sku', NEW.sku, 'product_name', NEW.product_name, 'category_id', NEW.category_id, 'unit_price', NEW.unit_price, 'reorder_level', NEW.reorder_level, 'unit', NEW.unit, 'archived_at', NEW.archived_at),
+    JSON_OBJECT('sku', OLD.sku, 'product_name', OLD.product_name, 'unit_price', OLD.unit_price, 'reorder_level', OLD.reorder_level, 'unit', OLD.unit, 'archived_at', OLD.archived_at),
+    JSON_OBJECT('sku', NEW.sku, 'product_name', NEW.product_name, 'unit_price', NEW.unit_price, 'reorder_level', NEW.reorder_level, 'unit', NEW.unit, 'archived_at', NEW.archived_at),
     @app_user_id
   FROM DUAL
-  WHERE NOT (OLD.sku <=> NEW.sku AND OLD.product_name <=> NEW.product_name AND OLD.category_id <=> NEW.category_id AND OLD.unit_price <=> NEW.unit_price AND OLD.reorder_level <=> NEW.reorder_level AND OLD.unit <=> NEW.unit AND OLD.archived_at <=> NEW.archived_at);
+  WHERE NOT (OLD.sku <=> NEW.sku AND OLD.product_name <=> NEW.product_name AND OLD.unit_price <=> NEW.unit_price AND OLD.reorder_level <=> NEW.reorder_level AND OLD.unit <=> NEW.unit AND OLD.archived_at <=> NEW.archived_at);
 DROP TRIGGER IF EXISTS trg_hist_categories;
 CREATE TRIGGER trg_hist_categories AFTER UPDATE ON categories FOR EACH ROW
   INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)
@@ -581,11 +637,11 @@ CREATE TRIGGER trg_hist_users AFTER UPDATE ON users FOR EACH ROW
   INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)
   SELECT 'users', OLD.user_id,
     'UPDATE',
-    JSON_OBJECT('full_name', OLD.full_name, 'username', OLD.username, 'email', OLD.email, 'role_id', OLD.role_id, 'job_title', OLD.job_title, 'phone', OLD.phone, 'status', OLD.status),
-    JSON_OBJECT('full_name', NEW.full_name, 'username', NEW.username, 'email', NEW.email, 'role_id', NEW.role_id, 'job_title', NEW.job_title, 'phone', NEW.phone, 'status', NEW.status),
+    JSON_OBJECT('full_name', OLD.full_name, 'username', OLD.username, 'email', OLD.email, 'job_title', OLD.job_title, 'phone', OLD.phone, 'status', OLD.status),
+    JSON_OBJECT('full_name', NEW.full_name, 'username', NEW.username, 'email', NEW.email, 'job_title', NEW.job_title, 'phone', NEW.phone, 'status', NEW.status),
     @app_user_id
   FROM DUAL
-  WHERE NOT (OLD.full_name <=> NEW.full_name AND OLD.username <=> NEW.username AND OLD.email <=> NEW.email AND OLD.role_id <=> NEW.role_id AND OLD.job_title <=> NEW.job_title AND OLD.phone <=> NEW.phone AND OLD.status <=> NEW.status);
+  WHERE NOT (OLD.full_name <=> NEW.full_name AND OLD.username <=> NEW.username AND OLD.email <=> NEW.email AND OLD.job_title <=> NEW.job_title AND OLD.phone <=> NEW.phone AND OLD.status <=> NEW.status);
 DROP TRIGGER IF EXISTS trg_hist_settings;
 CREATE TRIGGER trg_hist_settings AFTER UPDATE ON settings FOR EACH ROW
   INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by)

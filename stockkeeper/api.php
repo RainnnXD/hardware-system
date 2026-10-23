@@ -61,14 +61,34 @@ $CAN = [
     "archive" => ["admin"],
 ];
 
+/* An employee can hold several roles (user_roles). Keys come back ordered most-privileged first (admin, manager, inventory, cashier). */
+function user_role_keys($uid) {
+    global $ROLE_KEY;
+    $out = [];
+    foreach (rows("SELECT role_id FROM user_roles WHERE user_id = ? ORDER BY role_id", "i", [$uid]) as $r)
+        $out[] = $ROLE_KEY[(int)$r["role_id"]];
+    return $out;
+}
+function user_role_names($uid) {
+    return array_column(rows("SELECT r.role_name n FROM user_roles ur JOIN roles r ON r.role_id = ur.role_id
+                              WHERE ur.user_id = ? ORDER BY r.role_id", "i", [$uid]), "n");
+}
+/* Permissions are the UNION of all of the employee's roles. */
+function can_do($u, $perm) {
+    global $CAN;
+    return (bool)array_intersect($u["roles"], $CAN[$perm]);
+}
+function is_admin($u) { return in_array("admin", $u["roles"], true); }
+
 function current_user() {
     global $ROLE_KEY;
     static $u = false;
     if ($u !== false) return $u;
     $u = null;
     if (!empty($_SESSION["uid"])) {
-        $r = rows("SELECT user_id, full_name, username, email, phone, job_title, role_id, status, " . DT . " FROM users WHERE user_id = ?", "i", [$_SESSION["uid"]])[0] ?? null;
+        $r = rows("SELECT user_id, full_name, username, email, phone, job_title, status, " . DT . " FROM users WHERE user_id = ?", "i", [$_SESSION["uid"]])[0] ?? null;
         if ($r && $r["status"] === "Active") {
+            $roles = user_role_keys((int)$r["user_id"]);
             $u = [
                 "id"       => (int)$r["user_id"],
                 "name"     => $r["full_name"],
@@ -76,7 +96,8 @@ function current_user() {
                 "email"    => $r["email"],
                 "phone"    => $r["phone"] ?? "",
                 "title"    => $r["job_title"] ?? "",
-                "role"     => $ROLE_KEY[(int)$r["role_id"]],
+                "role"     => $roles[0] ?? "",   // main (most privileged) role, used for display
+                "roles"    => $roles,        // every role the employee holds
                 "cr"       => $r["cr"],
                 "up"       => $r["up"],
             ];
@@ -85,10 +106,9 @@ function current_user() {
     return $u;
 }
 function need($perm = null) {
-    global $CAN;
     $u = current_user();
     if (!$u) fail("Please sign in", 401);
-    if ($perm && !in_array($u["role"], $CAN[$perm])) fail("Permission denied: your role cannot do this", 403);
+    if ($perm && !can_do($u, $perm)) fail("Permission denied: your role cannot do this", 403);
     global $conn;
     $conn->query("SET @app_user_id = " . (int)$u["id"]); // lets the history triggers record who made each change
     return $u;
@@ -133,6 +153,52 @@ function save_links($pid, $main, $all) {
     run("UPDATE product_suppliers SET is_primary = 1 WHERE product_id = ? AND supplier_id = ?", "ii", [$pid, (int)$main]);
 }
 
+/* ---------- category links (many-to-many) ---------- */
+/* Same rules as supplier links: a product has one MAIN category (is_primary) plus any number of other categories.
+   Make sure the main category is an active one; if not, promote another active category. */
+function fix_primary_cat($pid) {
+    $cur = rows("SELECT c.archived_at FROM product_categories pc JOIN categories c ON c.category_id = pc.category_id
+                 WHERE pc.product_id = ? AND pc.is_primary = 1", "i", [$pid])[0] ?? null;
+    if ($cur && $cur["archived_at"] === null) return;
+    $n = rows("SELECT pc.category_id FROM product_categories pc JOIN categories c ON c.category_id = pc.category_id
+               WHERE pc.product_id = ? AND c.archived_at IS NULL ORDER BY pc.category_id LIMIT 1", "i", [$pid])[0] ?? null;
+    if (!$n) return;
+    run("UPDATE product_categories SET is_primary = 0 WHERE product_id = ?", "i", [$pid]);
+    run("UPDATE product_categories SET is_primary = 1 WHERE product_id = ? AND category_id = ?", "ii", [$pid, (int)$n["category_id"]]);
+}
+/* Replace a product's active-category links with $all and mark $main as the main category.
+   Links to archived categories are kept as history. */
+function save_cat_links($pid, $main, $all) {
+    run("UPDATE product_categories SET is_primary = 0 WHERE product_id = ?", "i", [$pid]);
+    $keep = implode(",", array_map("intval", $all));
+    run("DELETE pc FROM product_categories pc JOIN categories c ON c.category_id = pc.category_id
+         WHERE pc.product_id = ? AND c.archived_at IS NULL AND pc.category_id NOT IN ($keep)", "i", [$pid]);
+    foreach ($all as $cid)
+        run("INSERT INTO product_categories (product_id, category_id, is_primary) VALUES (?, ?, 0)
+             ON DUPLICATE KEY UPDATE product_id = product_id", "ii", [$pid, (int)$cid]);
+    run("UPDATE product_categories SET is_primary = 1 WHERE product_id = ? AND category_id = ?", "ii", [$pid, (int)$main]);
+}
+function product_cat_names($pid) { // main category first
+    return array_column(rows("SELECT c.category_name n FROM product_categories pc JOIN categories c ON c.category_id = pc.category_id
+                              WHERE pc.product_id = ? ORDER BY pc.is_primary DESC, c.category_name", "i", [$pid]), "n");
+}
+/* The record_history triggers only see changes to the main table. Changes to a link table (a product's categories,
+   an employee's roles) are written here, as one history row per save, and only when something really changed. */
+function link_history($table, $id, $nameKey, $name, $field, $old, $new, $uid) {
+    if ($old === $new) return;
+    $enc = fn($v) => json_encode([$nameKey => $name, $field => $v], JSON_UNESCAPED_UNICODE);
+    run("INSERT INTO record_history (table_name, record_id, change_type, old_values, new_values, changed_by) VALUES (?, ?, 'UPDATE', ?, ?, ?)",
+        "sissi", [$table, $id, $enc($old), $enc($new), $uid]);
+}
+/* Replace an employee's roles with $keys (only the differences are written). */
+function save_user_roles($uid, $keys) {
+    global $ROLE_ID;
+    $want = array_values(array_unique(array_map(fn($k) => (int)$ROLE_ID[$k], $keys)));
+    $have = array_map(fn($r) => (int)$r["role_id"], rows("SELECT role_id FROM user_roles WHERE user_id = ?", "i", [$uid]));
+    foreach (array_diff($have, $want) as $rid) run("DELETE FROM user_roles WHERE user_id = ? AND role_id = ?", "ii", [$uid, $rid]);
+    foreach (array_diff($want, $have) as $rid) run("INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)", "ii", [$uid, $rid]);
+}
+
 /* ---------- input ---------- */
 $action = $_GET["action"] ?? "";
 $in = json_decode(file_get_contents("php://input"), true);
@@ -140,8 +206,8 @@ if (!is_array($in)) $in = [];
 $str = fn($k, $max = 255) => mb_substr(trim((string)($in[$k] ?? "")), 0, $max);
 
 /* creates a user row with a hashed password; returns the new user_id */
-function make_user($name, $title, $roleKey, $pw, $phone = null, $status = "Active") {
-    global $conn, $ROLE_ID;
+function make_user($name, $title, $roleKeys, $pw, $phone = null, $status = "Active") {
+    global $conn;
     $base = strtolower(trim(preg_replace('/[^a-z0-9]+/i', ".", $name), "."));
     $base = substr($base ?: "user", 0, 30);
     $username = $base;
@@ -151,17 +217,22 @@ function make_user($name, $title, $roleKey, $pw, $phone = null, $status = "Activ
     }
     $email = $username . "@stockkeeper.example";
     $hash = password_hash($pw, PASSWORD_BCRYPT);
-    $rid = $ROLE_ID[$roleKey];
     $title = $title === "" ? null : $title;
-    run("INSERT INTO users (full_name, username, email, password_hash, role_id, job_title, phone, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)", "ssssisss",
-        [$name, $username, $email, $hash, $rid, $title, $phone, $status]);
-    return $conn->insert_id;
+    $conn->begin_transaction(); // the account and its roles are saved together or not at all
+    run("INSERT INTO users (full_name, username, email, password_hash, job_title, phone, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?)", "sssssss",
+        [$name, $username, $email, $hash, $title, $phone, $status]);
+    $newId = $conn->insert_id;
+    save_user_roles($newId, $roleKeys);
+    $conn->commit();
+    return $newId;
 }
 function next_sku($cat) {
     $c = rows("SELECT category_name FROM categories WHERE category_id = ?", "i", [$cat])[0] ?? null;
     if (!$c) fail("Choose a valid category");
-    $same = rows("SELECT sku FROM products WHERE category_id = ? AND sku LIKE '%-%' ORDER BY product_id LIMIT 1", "i", [$cat])[0] ?? null;
+    // the SKU prefix follows the product's MAIN category
+    $same = rows("SELECT p.sku FROM products p JOIN product_categories pc ON pc.product_id = p.product_id AND pc.is_primary = 1
+                  WHERE pc.category_id = ? AND p.sku LIKE '%-%' ORDER BY p.product_id LIMIT 1", "i", [$cat])[0] ?? null;
     if ($same) {
         $pre = explode("-", $same["sku"])[0];
     } else {
@@ -173,7 +244,8 @@ function next_sku($cat) {
     return $pre . "-" . (max($top, $cat * 1000) + 1);
 }
 function other_active_admins($excludeId) {
-    return (int)rows("SELECT COUNT(*) c FROM users WHERE role_id = 1 AND status = 'Active' AND user_id <> ?", "i", [$excludeId])[0]["c"];
+    return (int)rows("SELECT COUNT(DISTINCT u.user_id) c FROM users u JOIN user_roles ur ON ur.user_id = u.user_id AND ur.role_id = 1
+                     WHERE u.status = 'Active' AND u.user_id <> ?", "i", [$excludeId])[0]["c"];
 }
 
 /* strict validators (same rules as app.js) */
@@ -214,8 +286,16 @@ if (preg_match('/^(archive|restore)_([a-z]+)$/', $action, $m) && isset($ARCHIVAB
     if ($doArchive === $isArchived) out(["ok" => true, "archived" => $isArchived]); // nothing to change
 
     if ($doArchive) {
-        if ($kind === "category" && (int)rows("SELECT COUNT(*) c FROM products WHERE category_id = ? AND archived_at IS NULL", "i", [$id])[0]["c"] > 0)
-            fail("Archive or move the active products in this category first", 409);
+        if ($kind === "category") {
+            // A category may be archived as long as every active product in it still has another active category.
+            $stuck = rows("SELECT p.product_name FROM products p
+                           JOIN product_categories pc ON pc.product_id = p.product_id AND pc.category_id = ?
+                           WHERE p.archived_at IS NULL AND NOT EXISTS (
+                               SELECT 1 FROM product_categories o JOIN categories c ON c.category_id = o.category_id
+                               WHERE o.product_id = p.product_id AND o.category_id <> pc.category_id AND c.archived_at IS NULL)
+                           ORDER BY p.product_name LIMIT 3", "i", [$id]);
+            if ($stuck) fail("Add another category to these products first: " . implode(", ", array_column($stuck, "product_name")), 409);
+        }
         if ($kind === "supplier") {
             // A supplier may withdraw as long as every active product it supplies still has another active supplier.
             $stuck = rows("SELECT p.product_name FROM products p
@@ -231,18 +311,21 @@ if (preg_match('/^(archive|restore)_([a-z]+)$/', $action, $m) && isset($ARCHIVAB
         if ($kind === "supplier") // products that had this supplier as main switch to another active supplier
             foreach (rows("SELECT product_id FROM product_suppliers WHERE supplier_id = ? AND is_primary = 1", "i", [$id]) as $r)
                 fix_primary((int)$r["product_id"]);
+        if ($kind === "category") // products that had this category as main switch to another active category
+            foreach (rows("SELECT product_id FROM product_categories WHERE category_id = ? AND is_primary = 1", "i", [$id]) as $r)
+                fix_primary_cat((int)$r["product_id"]);
         $conn->commit();
     } else {
         if ($kind === "product") {
-            $p = rows("SELECT c.archived_at ca FROM products p
-                       JOIN categories c ON c.category_id = p.category_id WHERE p.product_id = ?", "i", [$id])[0] ?? null;
-            if ($p && $p["ca"] !== null) fail("Restore this product's category first", 409);
+            if (!rows("SELECT 1 FROM product_categories pc JOIN categories c ON c.category_id = pc.category_id
+                       WHERE pc.product_id = ? AND c.archived_at IS NULL LIMIT 1", "i", [$id]))
+                fail("Restore one of this product's categories first", 409);
             if (!rows("SELECT 1 FROM product_suppliers ps JOIN suppliers s ON s.supplier_id = ps.supplier_id
                        WHERE ps.product_id = ? AND s.archived_at IS NULL LIMIT 1", "i", [$id]))
                 fail("Restore one of this product's suppliers first", 409);
         }
         run("UPDATE `$tbl` SET archived_at = NULL WHERE `$pk` = ?", "i", [$id]);
-        if ($kind === "product") fix_primary($id);
+        if ($kind === "product") { fix_primary($id); fix_primary_cat($id); }
     }
     audit(ucfirst($kind) . ($doArchive ? " archived: " : " restored: ") . $rec["nm"]);
     out(["ok" => true, "archived" => $doArchive]);
@@ -283,7 +366,7 @@ case "deactivate_self":
 
     // Prevent the last active administrator from deactivating
     if (
-        $u["role"] === "admin" &&
+        is_admin($u) &&
         other_active_admins($u["id"]) < 1
     ) {
         fail("You cannot deactivate the last active administrator");
@@ -315,7 +398,7 @@ case "register": // public sign-up. Administrators cannot be created this way.
     if ($name === "") fail("Full name is required");
     if (strlen($pw) < 6) fail("Use at least 6 characters for the password");
     if (!isset($ROLE_ID[$role]) || in_array($role, ["admin", "manager"])) fail("Choose a valid role. Administrator and Manager accounts are created by an administrator.");
-    $newId = make_user($name, $title, $role, $pw, null, "Inactive"); // an administrator must activate it
+    $newId = make_user($name, $title, [$role], $pw, null, "Inactive"); // an administrator must activate it
     $uname = rows("SELECT username FROM users WHERE user_id = ?", "i", [$newId])[0]["username"] ?? "";
     audit("Employee added: $name (self sign-up, waiting for activation)", $newId);
     out(["id" => $newId, "username" => $uname, "pending" => true]);
@@ -338,10 +421,13 @@ case "bootstrap":
     $links = []; // product_id => [main supplier first, then the other suppliers]
     foreach (rows("SELECT product_id, supplier_id FROM product_suppliers ORDER BY is_primary DESC, supplier_id") as $r)
         $links[(int)$r["product_id"]][] = (int)$r["supplier_id"];
+    $catLinks = []; // product_id => [main category first, then the other categories]
+    foreach (rows("SELECT product_id, category_id FROM product_categories ORDER BY is_primary DESC, category_id") as $r)
+        $catLinks[(int)$r["product_id"]][] = (int)$r["category_id"];
     $data["prod"] = array_map(fn($r) => ["id" => (int)$r["product_id"], "sku" => $r["sku"], "name" => $r["product_name"],
-        "cat" => (int)$r["category_id"], "sup" => $links[(int)$r["product_id"]][0] ?? 0, "sups" => $links[(int)$r["product_id"]] ?? [], "price" => (float)$r["unit_price"],
+        "cat" => $catLinks[(int)$r["product_id"]][0] ?? 0, "cats" => $catLinks[(int)$r["product_id"]] ?? [], "sup" => $links[(int)$r["product_id"]][0] ?? 0, "sups" => $links[(int)$r["product_id"]] ?? [], "price" => (float)$r["unit_price"],
         "stock" => (int)$r["stock_quantity"], "min" => (int)$r["reorder_level"], "unit" => $r["unit"], "arch" => (bool)$r["arch"], "cr" => $r["cr"], "up" => $r["up"], "ar" => $r["ar"]],
-        rows("SELECT product_id, sku, product_name, category_id, unit_price, stock_quantity, reorder_level, unit, archived_at IS NOT NULL AS arch, " . DTA . "
+        rows("SELECT product_id, sku, product_name, unit_price, stock_quantity, reorder_level, unit, archived_at IS NOT NULL AS arch, " . DTA . "
               FROM products ORDER BY product_id DESC"));
 
     $data["mov"] = array_map(fn($r) => ["id" => (int)$r["movement_id"], "date" => $r["d"], "pid" => (int)$r["product_id"],
@@ -372,28 +458,33 @@ case "bootstrap":
     $data["set"] = ["store" => $s["store_name"], "tax" => (float)$s["tax_rate"], "reorder" => (int)$s["reorder_level"], "footer" => $s["receipt_footer"] ?? "", "cr" => $s["cr"] ?? "", "up" => $s["up"] ?? ""];
 
     // employees and logs are only sent to roles that can see them
+    $isAdmin = is_admin($u);
     $data["emp"] = [];
-    if ($u["role"] === "admin") {
+    if ($isAdmin) {
+        $roleMap = []; // user_id => [role keys, most privileged first]
+        foreach (rows("SELECT user_id, role_id FROM user_roles ORDER BY role_id") as $r)
+            $roleMap[(int)$r["user_id"]][] = $ROLE_KEY[(int)$r["role_id"]];
         $data["emp"] = array_map(fn($r) => ["id" => (int)$r["user_id"], "name" => $r["full_name"], "username" => $r["username"], "title" => $r["job_title"] ?? "",
-            "role" => $ROLE_KEY[(int)$r["role_id"]], "phone" => $r["phone"] ?: "—", "status" => $r["status"], "cr" => $r["cr"], "up" => $r["up"]],
-            rows("SELECT user_id, full_name, username, job_title, role_id, phone, status, " . DT . " FROM users ORDER BY user_id DESC"));
+            "role" => $roleMap[(int)$r["user_id"]][0] ?? "", "roles" => $roleMap[(int)$r["user_id"]] ?? [], "phone" => $r["phone"] ?: "—", "status" => $r["status"], "cr" => $r["cr"], "up" => $r["up"]],
+            rows("SELECT user_id, full_name, username, job_title, phone, status, " . DT . " FROM users ORDER BY user_id DESC"));
     }
     $data["logs"] = [];
-    if ($u["role"] === "admin") {
+    if ($isAdmin) {
         $data["logs"] = array_map(fn($r) => ["t" => $r["d"], "u" => $r["full_name"] ?? "Deleted user",
             "r" => $r["role_id"] ? $ROLE_KEY[(int)$r["role_id"]] : "cashier", "a" => $r["description"]],
             rows("SELECT * FROM (
-                    SELECT l.log_id, DATE_FORMAT(l.date_created, '%Y-%m-%d %H:%i') d, u.full_name, u.role_id, l.description
+                    SELECT l.log_id, DATE_FORMAT(l.date_created, '%Y-%m-%d %H:%i') d, u.full_name,
+                           (SELECT MIN(ur.role_id) FROM user_roles ur WHERE ur.user_id = u.user_id) AS role_id, l.description
                     FROM activity_logs l LEFT JOIN users u ON u.user_id = l.user_id
                     ORDER BY l.log_id DESC LIMIT 300) t ORDER BY log_id"));
     }
     $data["hist"] = [];
-    if ($u["role"] === "admin") {
+    if ($isAdmin) {
         $data["hist"] = array_map(fn($r) => ["t" => $r["d"], "tbl" => $r["table_name"], "id" => (int)$r["record_id"], "type" => $r["change_type"],
             "old" => json_decode($r["old_values"], true) ?: [], "new" => json_decode($r["new_values"], true) ?: [], "u" => $r["full_name"] ?? "System"],
             rows("SELECT h.history_id, h.table_name, h.record_id, h.change_type, DATE_FORMAT(h.changed_at, '%Y-%m-%d %H:%i') d, h.old_values, h.new_values, u.full_name
                   FROM record_history h LEFT JOIN users u ON u.user_id = h.changed_by
-                  WHERE " . ($u["role"] === "admin" ? "1 = 1" : "h.table_name <> 'users'") . "
+                  WHERE " . ($isAdmin ? "1 = 1" : "h.table_name <> 'users'") . "
                   ORDER BY h.history_id DESC LIMIT 500"));
     }
     out(["user" => $u, "data" => $data]);
@@ -403,15 +494,20 @@ case "save_product":
     $u = need("manage");
     $id = (int)($in["id"] ?? 0);
     $name = $str("name", 150); $unit = $str("unit", 20);
-    $cat = (int)($in["cat"] ?? 0); $sup = (int)($in["sup"] ?? 0); // $sup = main supplier
+    $cat = (int)($in["cat"] ?? 0); $sup = (int)($in["sup"] ?? 0); // $cat / $sup = main category / main supplier
+    $moreCats = is_array($in["cats"] ?? null) ? array_map("intval", $in["cats"]) : [];
+    $allCats = array_values(array_unique(array_filter(array_merge([$cat], $moreCats), fn($x) => $x > 0)));
     $more = is_array($in["sups"] ?? null) ? array_map("intval", $in["sups"]) : [];
     $all = array_values(array_unique(array_filter(array_merge([$sup], $more), fn($x) => $x > 0)));
-    $price = (float)($in["price"] ?? 0); $stock = in_array($u["role"], $CAN["stock"]) ? (int)($in["stock"] ?? 0) : null; $min = (int)($in["min"] ?? 0);
+    $price = (float)($in["price"] ?? 0); $stock = can_do($u, "stock") ? (int)($in["stock"] ?? 0) : null; $min = (int)($in["min"] ?? 0);
     if ($name === "" || $unit === "") fail("Name and unit are required");
     if ($price <= 0) fail("Price must be greater than zero");
     if ($stock < 0 || $min < 0) fail("Stock and reorder level cannot be negative");
     if ($price > 99999999.99 || $stock > 2000000000 || $min > 2000000000) fail("Price, stock or reorder level is too large");
-    if (!rows("SELECT 1 FROM categories WHERE category_id = ? AND archived_at IS NULL", "i", [$cat])) fail("Choose an active category");
+    if ($cat < 1) fail("Choose a main category");
+    if (count($allCats) > 20) fail("A product can be in at most 20 categories");
+    foreach ($allCats as $cid)
+        if (!rows("SELECT 1 FROM categories WHERE category_id = ? AND archived_at IS NULL", "i", [$cid])) fail("Choose active categories only");
     if ($sup < 1) fail("Choose a main supplier");
     if (count($all) > 20) fail("A product can have at most 20 suppliers");
     foreach ($all as $sid)
@@ -422,8 +518,9 @@ case "save_product":
         if (!$old) fail("Product not found", 404);
         $sku = $old["sku"];
         if ($stock === null) $stock = (int)$old["stock_quantity"]; // managers cannot change quantities
-        run("UPDATE products SET sku=?, product_name=?, category_id=?, unit_price=?, stock_quantity=?, reorder_level=?, unit=?
-             WHERE product_id=?", "ssidiisi", [$sku, $name, $cat, $price, $stock, $min, $unit, $id]);
+        $oldCats = product_cat_names($id);
+        run("UPDATE products SET sku=?, product_name=?, unit_price=?, stock_quantity=?, reorder_level=?, unit=?
+             WHERE product_id=?", "ssdiisi", [$sku, $name, $price, $stock, $min, $unit, $id]);
         $diff = $stock - (int)$old["stock_quantity"];
         if ($diff != 0) { // keep the stock ledger honest when stock is edited here
             run("INSERT INTO inventory_movements (product_id, user_id, movement_type, quantity, remarks) VALUES (?, ?, ?, ?, 'Edited in product form')",
@@ -432,8 +529,8 @@ case "save_product":
     } else {
         $sku = next_sku($cat);
         if ($stock === null) $stock = 0; // opening stock is received by inventory staff
-        run("INSERT INTO products (sku, product_name, category_id, unit_price, stock_quantity, reorder_level, unit)
-             VALUES (?, ?, ?, ?, ?, ?, ?)", "ssidiis", [$sku, $name, $cat, $price, $stock, $min, $unit]);
+        run("INSERT INTO products (sku, product_name, unit_price, stock_quantity, reorder_level, unit)
+             VALUES (?, ?, ?, ?, ?, ?)", "ssdiis", [$sku, $name, $price, $stock, $min, $unit]);
         $newId = $conn->insert_id;
         if ($stock > 0) {
             run("INSERT INTO inventory_movements (product_id, user_id, movement_type, quantity, remarks) VALUES (?, ?, 'IN', ?, 'Opening stock')",
@@ -441,6 +538,8 @@ case "save_product":
         }
     }
     save_links($id ?: $newId, $sup, $all);
+    save_cat_links($id ?: $newId, $cat, $allCats);
+    if ($id) link_history("products", $id, "product_name", $name, "categories", $oldCats, product_cat_names($id), $u["id"]);
     $conn->commit();
     audit("Product " . ($id ? "updated: " : "added: ") . $name);
     out(["ok" => true, "sku" => $sku]);
@@ -505,27 +604,35 @@ case "save_customer":
 case "save_employee":
     $u = need("users");
     $id = (int)($in["id"] ?? 0);
-    $name = $str("name", 100); $title = $str("title", 80); $role = $str("role", 20);
+    $name = $str("name", 100); $title = $str("title", 80);
+    // an employee can hold several roles: "roles" is a list of role keys (a single "role" is still accepted)
+    $roleKeys = is_array($in["roles"] ?? null) ? array_map("strval", $in["roles"]) : [$str("role", 20)];
+    $roleKeys = array_values(array_unique(array_filter($roleKeys, fn($k) => $k !== "")));
     $phone = $str("phone", 30);
     if ($phone === "" || $phone === "—") $phone = null;
     if ($name === "") fail("Full name is required");
     if ($phone !== null && !valid_ph_phone($phone)) fail("Enter a valid Philippine mobile number (09XXXXXXXXX)");
-    if (!isset($ROLE_ID[$role])) fail("Invalid role");
+    if (!$roleKeys) fail("Choose at least one role");
+    foreach ($roleKeys as $k) if (!isset($ROLE_ID[$k])) fail("Invalid role");
     $newUser = null;
     if ($id) {
         if ($id === $u["id"]) fail("Ask another administrator to edit your own record");
-        $cur = rows("SELECT role_id FROM users WHERE user_id = ?", "i", [$id])[0] ?? null;
-        if (!$cur) fail("Employee not found", 404);
-        if ((int)$cur["role_id"] === 1 && $role !== "admin" && other_active_admins($id) < 1) {
-            fail("You cannot demote the last active administrator");
+        if (!rows("SELECT 1 FROM users WHERE user_id = ?", "i", [$id])) fail("Employee not found", 404);
+        $oldRoles = user_role_names($id);
+        if (in_array("admin", user_role_keys($id), true) && !in_array("admin", $roleKeys, true) && other_active_admins($id) < 1) {
+            fail("You cannot remove the Administrator role from the last active administrator");
         }
+        $conn->begin_transaction();
         // status is intentionally not editable here: use set_employee_status
-        run("UPDATE users SET full_name=?, job_title=?, role_id=?, phone=? WHERE user_id=?",
-            "ssisi", [$name, $title === "" ? null : $title, $ROLE_ID[$role], $phone, $id]);
+        run("UPDATE users SET full_name=?, job_title=?, phone=? WHERE user_id=?",
+            "sssi", [$name, $title === "" ? null : $title, $phone, $id]);
+        save_user_roles($id, $roleKeys);
+        link_history("users", $id, "full_name", $name, "roles", $oldRoles, user_role_names($id), $u["id"]);
+        $conn->commit();
     } else {
         $pw = (string)($in["pw"] ?? "");
         if (strlen($pw) < 6) fail("Use at least 6 characters for the password");
-        $newId = make_user($name, $title, $role, $pw, $phone, "Active"); // new accounts start Active
+        $newId = make_user($name, $title, $roleKeys, $pw, $phone, "Active"); // new accounts start Active
         $newUser = rows("SELECT username FROM users WHERE user_id = ?", "i", [$newId])[0]["username"] ?? null;
     }
     audit("Employee " . ($id ? "updated: " : "added: ") . $name);
@@ -540,10 +647,10 @@ case "set_employee_status":
     if ($id < 1) fail("Choose a valid employee");
     if (!in_array($status, ["Active", "Inactive"], true)) fail("Invalid status");
     if ($id === $u["id"]) fail("You cannot change the status of your own account here");
-    $cur = rows("SELECT full_name, role_id, status FROM users WHERE user_id = ?", "i", [$id])[0] ?? null;
+    $cur = rows("SELECT full_name, status FROM users WHERE user_id = ?", "i", [$id])[0] ?? null;
     if (!$cur) fail("Employee not found", 404);
     if ($cur["status"] === $status) out(["ok" => true, "status" => $status]); // nothing to change
-    if ($status === "Inactive" && (int)$cur["role_id"] === 1 && other_active_admins($id) < 1)
+    if ($status === "Inactive" && in_array("admin", user_role_keys($id), true) && other_active_admins($id) < 1)
         fail("You cannot deactivate the last active administrator");
     run("UPDATE users SET status = ? WHERE user_id = ?", "si", [$status, $id]);
     audit("Employee " . ($status === "Active" ? "activated: " : "deactivated: ") . $cur["full_name"]);
