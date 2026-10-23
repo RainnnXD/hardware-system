@@ -286,6 +286,27 @@ function openForm(title, fs, vals, save) {
 }
 
 /* ============ CRUD: products, categories, suppliers ============ */
+/* Preview of the SKU the server will assign (same rule as next_sku() in api.php,
+   which stays the authority). Returns "" when no category is chosen yet. */
+function nextSku(catId) {
+  const c = db.cats.find((x) => x.id === catId);
+  if (!c) return "";
+  const same = db.prod
+    .filter((p) => p.cat === catId && p.sku.includes("-"))
+    .sort((a, b) => a.id - b.id)[0];
+  let pre;
+  if (same) pre = same.sku.split("-")[0];
+  else {
+    const w = c.name.split(/[^A-Za-z]+/).filter(Boolean);
+    pre = (w.length > 1 ? w[0][0] + w[1][0] : (w[0] || "XX").slice(0, 2)).toUpperCase();
+  }
+  let top = 0;
+  db.prod.forEach((p) => {
+    if (p.sku.startsWith(pre + "-"))
+      top = Math.max(top, parseInt(p.sku.split("-").pop(), 10) || 0);
+  });
+  return pre + "-" + (Math.max(top, catId * 1000) + 1);
+}
 const S = {
   prod: {
     k: "prod",
@@ -380,7 +401,7 @@ function edit(s, id) {
     it = id
       ? db[c.k].find((x) => x.id === id)
       : s == "prod"
-        ? { min: db.set.reorder, sku: nextSku((db.cats[0] || {}).id) }
+        ? { min: db.set.reorder }
         : {};
   const fs = c.f();
   if (s == "emp" && !id)
@@ -833,7 +854,7 @@ function newSale() {
     {},
     async (d) => {
       const j = await api("add_sale", {
-        cid: d.cid,
+        cust: d.cust,
         pid: d.pid,
         qty: d.qty,
         pay: d.pay,

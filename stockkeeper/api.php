@@ -58,6 +58,7 @@ $CAN = [
     "stock"  => ["admin", "inventory"],
     "sell"   => ["admin", "cashier"],
     "customers" => ["admin", "manager", "cashier"],
+    "archive" => ["admin"],
 ];
 
 function current_user() {
@@ -144,10 +145,10 @@ function valid_ph_phone($p) { return preg_match('/^09\d{9}$/', $p) === 1; } // 0
    Records are never removed. Archiving sets archived_at; restoring clears it.
    Requires the archived_at columns defined in stockkeeper.sql. */
 $ARCHIVABLE = [
-    "product"  => ["products",   "product_id",  "manage"],
-    "category" => ["categories", "category_id", "manage"],
-    "supplier" => ["suppliers",  "supplier_id", "manage"],
-    "customer" => ["customers",  "customer_id", "manage"],
+    "product"  => ["products",   "product_id",  "archive"],
+    "category" => ["categories", "category_id", "archive"],
+    "supplier" => ["suppliers",  "supplier_id", "archive"],
+    "customer" => ["customers",  "customer_id", "archive"],
 ];
 if (preg_match('/^(archive|restore)_([a-z]+)$/', $action, $m) && isset($ARCHIVABLE[$m[2]])) {
     $doArchive = $m[1] === "archive";
@@ -374,17 +375,16 @@ case "save_supplier":
     need("manage");
     $id = (int)($in["id"] ?? 0);
     $name = $str("name", 120); $contact = $str("contact", 100);
-    $street = $str("street", 120); $brgy = $str("brgy", 80); $city = $str("city", 80); $prov = $str("prov", 80);
+    $address = $str("city", 255); // the form's "City / Province" field is stored in suppliers.address
     $phone = $str("phone", 30); $email = $str("email", 120);
     $email = $email === "" ? null : $email;
-    $street = $street === "" ? null : $street;
-    if ($name === "" || $contact === "" || $brgy === "" || $city === "" || $prov === "" || $phone === "") fail("Company, contact, barangay, city, province and phone are required");
+    if ($name === "" || $contact === "" || $address === "" || $phone === "") fail("Company, contact, city / province and phone are required");
     if (!valid_ph_phone($phone)) fail("Enter a valid Philippine mobile number (09XXXXXXXXX)");
     if ($email !== null && !valid_email($email)) fail("Enter a valid email address");
-    if ($id) run("UPDATE suppliers SET company_name=?, contact_person=?, phone=?, email=?, street=?, barangay=?, city=?, province=? WHERE supplier_id=?",
-                 "ssssssssi", [$name, $contact, $phone, $email, $street, $brgy, $city, $prov, $id]);
-    else     run("INSERT INTO suppliers (company_name, contact_person, phone, email, street, barangay, city, province) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                 "ssssssss", [$name, $contact, $phone, $email, $street, $brgy, $city, $prov]);
+    if ($id) run("UPDATE suppliers SET company_name=?, contact_person=?, phone=?, email=?, address=? WHERE supplier_id=?",
+                 "sssssi", [$name, $contact, $phone, $email, $address, $id]);
+    else     run("INSERT INTO suppliers (company_name, contact_person, phone, email, address) VALUES (?, ?, ?, ?, ?)",
+                 "sssss", [$name, $contact, $phone, $email, $address]);
     out(["ok" => true]);
 
 /* ====================== CUSTOMERS ====================== */
