@@ -139,7 +139,19 @@ function other_active_admins($excludeId) {
 
 /* strict validators (same rules as app.js) */
 function valid_email($e) { return filter_var($e, FILTER_VALIDATE_EMAIL) !== false && strlen($e) <= 120; }
-function valid_ph_phone($p) { return preg_match('/^09\d{9}$/', $p) === 1; } // 09XXXXXXXXX, 11 digits
+function phone_digits($p) {
+    return preg_replace('/\D+/', '', (string)$p);
+}
+function valid_ph_phone($p) {
+    // Accept common display formats such as 0917 123 4567 or 0917-123-4567.
+    return preg_match('/^09\d{9}$/', phone_digits($p)) === 1;
+}
+function valid_supplier_phone($p) {
+    // Suppliers may use a mobile number or a Philippine landline such as (02) 8365 1420.
+    $digits = phone_digits($p);
+    return preg_match('/^09\d{9}$/', $digits) === 1
+        || preg_match('/^0[2-8]\d{7,9}$/', $digits) === 1;
+}
 
 /* ---------- archive / restore (replaces permanent delete) ----------
    Records are never removed. Archiving sets archived_at; restoring clears it.
@@ -257,8 +269,10 @@ case "bootstrap":
         rows("SELECT category_id, category_name, description, archived_at IS NOT NULL AS arch, " . DTA . " FROM categories ORDER BY category_id DESC"));
 
     $data["sup"] = array_map(fn($r) => ["id" => (int)$r["supplier_id"], "name" => $r["company_name"], "contact" => $r["contact_person"],
-        "phone" => $r["phone"], "email" => $r["email"] ?? "", "city" => $r["address"], "arch" => (bool)$r["arch"]],
-        rows("SELECT supplier_id, company_name, contact_person, phone, email, address, archived_at IS NOT NULL AS arch FROM suppliers ORDER BY supplier_id DESC"));
+        "phone" => $r["phone"], "email" => $r["email"] ?? "", "addr" => $r["address"],
+        "street" => $r["street"] ?? "", "brgy" => $r["barangay"] ?? "", "city" => $r["city"] ?? "", "prov" => $r["province"] ?? "",
+        "arch" => (bool)$r["arch"]],
+        rows("SELECT supplier_id, company_name, contact_person, phone, email, address, street, barangay, city, province, archived_at IS NOT NULL AS arch FROM suppliers ORDER BY supplier_id DESC"));
 
     $data["prod"] = array_map(fn($r) => ["id" => (int)$r["product_id"], "sku" => $r["sku"], "name" => $r["product_name"],
         "cat" => (int)$r["category_id"], "sup" => (int)$r["supplier_id"], "price" => (float)$r["unit_price"],
@@ -375,16 +389,19 @@ case "save_supplier":
     need("manage");
     $id = (int)($in["id"] ?? 0);
     $name = $str("name", 120); $contact = $str("contact", 100);
-    $address = $str("city", 255); // the form's "City / Province" field is stored in suppliers.address
+    $street = $str("street", 120); $brgy = $str("brgy", 80); $city = $str("city", 80); $prov = $str("prov", 80);
     $phone = $str("phone", 30); $email = $str("email", 120);
     $email = $email === "" ? null : $email;
-    if ($name === "" || $contact === "" || $address === "" || $phone === "") fail("Company, contact, city / province and phone are required");
-    if (!valid_ph_phone($phone)) fail("Enter a valid Philippine mobile number (09XXXXXXXXX)");
+    if ($name === "" || $contact === "" || $brgy === "" || $city === "" || $prov === "" || $phone === "") fail("Company, contact, barangay, city, province and phone are required");
+    // suppliers.address keeps the full one-line address (also used by the change history)
+    $address = mb_substr(implode(", ", array_filter([$street, "Brgy. " . $brgy, $city, $prov], fn($x) => $x !== "")), 0, 255);
+    $street = $street === "" ? null : $street;
+    if (!valid_supplier_phone($phone)) fail("Enter a valid Philippine mobile or landline number");
     if ($email !== null && !valid_email($email)) fail("Enter a valid email address");
-    if ($id) run("UPDATE suppliers SET company_name=?, contact_person=?, phone=?, email=?, address=? WHERE supplier_id=?",
-                 "sssssi", [$name, $contact, $phone, $email, $address, $id]);
-    else     run("INSERT INTO suppliers (company_name, contact_person, phone, email, address) VALUES (?, ?, ?, ?, ?)",
-                 "sssss", [$name, $contact, $phone, $email, $address]);
+    if ($id) run("UPDATE suppliers SET company_name=?, contact_person=?, phone=?, email=?, address=?, street=?, barangay=?, city=?, province=? WHERE supplier_id=?",
+                 "sssssssssi", [$name, $contact, $phone, $email, $address, $street, $brgy, $city, $prov, $id]);
+    else     run("INSERT INTO suppliers (company_name, contact_person, phone, email, address, street, barangay, city, province) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 "sssssssss", [$name, $contact, $phone, $email, $address, $street, $brgy, $city, $prov]);
     out(["ok" => true]);
 
 /* ====================== CUSTOMERS ====================== */

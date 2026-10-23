@@ -316,6 +316,7 @@ const S = {
         n: "sku",
         l: 'SKU <span class="auto" title="Auto-generated">*</span>',
         ro: 1,
+        opt: 1,
         h: '<span class="auto">*</span> Auto-generated from the category. It cannot be edited.',
       },
       { n: "name", l: "Product name", ph: "e.g. Portland Cement 40 kg" },
@@ -345,7 +346,15 @@ const S = {
       },
       { n: "stock", l: "Stock on hand", t: "number", ph: "e.g. 100" },
       { n: "min", l: "Reorder level", t: "number", ph: "e.g. 20" },
-      { n: "unit", l: "Unit (pcs, kg, roll)", ph: "e.g. bag, pcs, kg" },
+      {
+        n: "unit",
+        l: "Unit (pcs, kg, roll)",
+        ph: "e.g. bag, pcs, kg",
+        v: (value) =>
+          /^[a-zA-Z ]+$/.test(String(value).trim())
+        ? ""
+        : "Letters only. Numbers and special characters are not allowed",
+      },
     ],
   },
   cat: {
@@ -367,7 +376,10 @@ const S = {
     f: () => [
       { n: "name", l: "Company", ph: "e.g. Calamba Cement & Masonry Depot" },
       { n: "contact", l: "Contact person", ph: "e.g. Juan Dela Cruz" },
-      { n: "city", l: "City / Province", ph: "e.g. Calamba City, Laguna" },
+      { n: "street", l: "Street / building (optional)", opt: 1, ph: "e.g. MacArthur Highway" },
+      { n: "brgy", l: "Barangay", ph: "e.g. Real" },
+      { n: "city", l: "City / Municipality", ph: "e.g. Calamba City" },
+      { n: "prov", l: "Province", ph: "e.g. Laguna" },
       { n: "phone", l: "Phone", t: "tel", ph: "09XXXXXXXXX" },
       { n: "email", l: "Email", t: "email", ph: "name@company.com" },
     ],
@@ -629,7 +641,13 @@ function rSup() {
       ],
       ["Contact", (s) => e(s.contact)],
       ["Barangay", (s) => e(s.brgy || "—")],
-      ["City", (s) => e(s.city || "—")],
+      [
+        "City",
+        (s) =>
+          s.city || s.prov
+            ? e(s.city || "—") + (s.prov ? `<div class="mu2">${e(s.prov)}</div>` : "")
+            : e(s.addr || "—"),
+      ],
       ["Phone", (s) => e(s.phone), "m"],
       ["Email", (s) => e(s.email)],
       [

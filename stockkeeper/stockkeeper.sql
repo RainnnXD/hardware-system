@@ -31,6 +31,19 @@
 --   For settings (already has updated_at), add the creation date and back-fill it without touching updated_at:
 --     ALTER TABLE settings ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER receipt_footer;
 --     UPDATE settings SET created_at = updated_at, updated_at = updated_at WHERE setting_id = 1;
+--   For the supplier address parts (street, barangay, city, province) on an existing database, run once:
+--     ALTER TABLE suppliers
+--       ADD COLUMN street   VARCHAR(120) NULL AFTER address,
+--       ADD COLUMN barangay VARCHAR(80)  NULL AFTER street,
+--       ADD COLUMN city     VARCHAR(80)  NULL AFTER barangay,
+--       ADD COLUMN province VARCHAR(80)  NULL AFTER city;
+--     then fill the parts of the six sample suppliers (updated_at = updated_at keeps their last-updated time):
+--     UPDATE suppliers SET barangay='Real',          city='Calamba City',  province='Laguna',   updated_at=updated_at WHERE supplier_id=1;
+--     UPDATE suppliers SET barangay='Pallocan West', city='Batangas City', province='Batangas', updated_at=updated_at WHERE supplier_id=2;
+--     UPDATE suppliers SET barangay='Anabu II-A',    city='Imus City',     province='Cavite',   updated_at=updated_at WHERE supplier_id=3;
+--     UPDATE suppliers SET street='MacArthur Highway', barangay='Karuhatan', city='Valenzuela City', province='Metro Manila', updated_at=updated_at WHERE supplier_id=4;
+--     UPDATE suppliers SET barangay='Landayan',      city='San Pedro City', province='Laguna',  updated_at=updated_at WHERE supplier_id=5;
+--     UPDATE suppliers SET barangay='Sabang',        city='Lipa City',     province='Batangas', updated_at=updated_at WHERE supplier_id=6;
 --   For the customers feature on an existing database, run the CREATE TABLE customers block and the
 --   trg_no_delete_customers trigger below, then:
 --     ALTER TABLE sales ADD COLUMN customer_id INT UNSIGNED NULL AFTER user_id,
@@ -97,7 +110,11 @@ CREATE TABLE suppliers (
   contact_person  VARCHAR(100)      NOT NULL,
   phone           VARCHAR(30)       NOT NULL,
   email           VARCHAR(120)      NULL,
-  address         VARCHAR(255)      NOT NULL,
+  address         VARCHAR(255)      NOT NULL,                 -- full one-line address, built by api.php from the four parts below
+  street          VARCHAR(120)      NULL,                     -- street / building (optional)
+  barangay        VARCHAR(80)       NULL,
+  city            VARCHAR(80)       NULL,
+  province        VARCHAR(80)       NULL,
   archived_at    DATETIME         NULL DEFAULT NULL,  -- NULL = active, timestamp = archived (restorable)
   created_at     DATETIME          NOT NULL DEFAULT CURRENT_TIMESTAMP,  -- set once when the record is created
   updated_at     DATETIME          NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,  -- refreshed automatically on every change
@@ -386,13 +403,13 @@ INSERT INTO categories (category_id, category_name, description) VALUES
  (6,'Paint & Sealants','Latex paint, roof sealant'),
  (7,'Fasteners','Nails, screws, bolts');
 
-INSERT INTO suppliers (supplier_id, company_name, contact_person, phone, email, address) VALUES
- (1,'Calamba Cement & Masonry Depot','Ernesto Dimaculangan','0917 812 4405','orders@calambacement.example','Brgy. Real, Calamba City, Laguna'),
- (2,'Batangas Steel Trading Corp.','Lorna Macalintal','0928 553 1076','sales@batangassteel.example','Brgy. Pallocan West, Batangas City, Batangas'),
- (3,'Imus Lumber & Plywood Center','Rodel Bautista','0998 217 6630','imuslumber@trade.example','Brgy. Anabu II-A, Imus City, Cavite'),
- (4,'Valenzuela Pipe & Fittings Supply','Cherry Anne Santos','(02) 8365 1420','benta@valpipe.example','MacArthur Highway, Brgy. Karuhatan, Valenzuela City, Metro Manila'),
- (5,'San Pedro Electrical Supply','Noel Cabrera','0919 674 2285','noel@sanpedroelec.example','Brgy. Landayan, San Pedro City, Laguna'),
- (6,'Lipa Paints & Coatings Co.','Marites Landicho','0945 330 7918','accounts@lipapaints.example','Brgy. Sabang, Lipa City, Batangas');
+INSERT INTO suppliers (supplier_id, company_name, contact_person, phone, email, address, street, barangay, city, province) VALUES
+ (1,'Calamba Cement & Masonry Depot','Ernesto Dimaculangan','0917 812 4405','orders@calambacement.example','Brgy. Real, Calamba City, Laguna',NULL,'Real','Calamba City','Laguna'),
+ (2,'Batangas Steel Trading Corp.','Lorna Macalintal','0928 553 1076','sales@batangassteel.example','Brgy. Pallocan West, Batangas City, Batangas',NULL,'Pallocan West','Batangas City','Batangas'),
+ (3,'Imus Lumber & Plywood Center','Rodel Bautista','0998 217 6630','imuslumber@trade.example','Brgy. Anabu II-A, Imus City, Cavite',NULL,'Anabu II-A','Imus City','Cavite'),
+ (4,'Valenzuela Pipe & Fittings Supply','Cherry Anne Santos','(02) 8365 1420','benta@valpipe.example','MacArthur Highway, Brgy. Karuhatan, Valenzuela City, Metro Manila','MacArthur Highway','Karuhatan','Valenzuela City','Metro Manila'),
+ (5,'San Pedro Electrical Supply','Noel Cabrera','0919 674 2285','noel@sanpedroelec.example','Brgy. Landayan, San Pedro City, Laguna',NULL,'Landayan','San Pedro City','Laguna'),
+ (6,'Lipa Paints & Coatings Co.','Marites Landicho','0945 330 7918','accounts@lipapaints.example','Brgy. Sabang, Lipa City, Batangas',NULL,'Sabang','Lipa City','Batangas');
 
 INSERT INTO customers (customer_id, customer_name, phone, street, barangay, city, province) VALUES
  (1,'JM Dela Cruz Construction','0917 622 3041','National Highway','Halang','Calamba City','Laguna'),
@@ -594,15 +611,3 @@ CREATE TRIGGER trg_hist_settings AFTER UPDATE ON settings FOR EACH ROW
     @app_user_id
   FROM DUAL
   WHERE NOT (OLD.store_name <=> NEW.store_name AND OLD.tax_rate <=> NEW.tax_rate AND OLD.reorder_level <=> NEW.reorder_level AND OLD.receipt_footer <=> NEW.receipt_footer);
-
--- =============================================================================
--- ALREADY HAVE DATA? Receipts keep the product name as sold. Run once, in this order (remove the leading "-- "):
--- =============================================================================
--- ALTER TABLE sale_items ADD COLUMN product_name VARCHAR(150) NOT NULL DEFAULT '' AFTER product_id;
--- DROP TRIGGER IF EXISTS trg_no_update_sale_items;
--- UPDATE sale_items si JOIN products p ON p.product_id = si.product_id SET si.product_name = p.product_name WHERE si.product_name = '';
--- CREATE TRIGGER trg_no_update_sale_items BEFORE UPDATE ON sale_items FOR EACH ROW
---   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Historical records cannot be edited.';
--- CREATE TRIGGER trg_sale_items_name BEFORE INSERT ON sale_items FOR EACH ROW
---   SET NEW.product_name = COALESCE(NULLIF(NEW.product_name, ''), (SELECT p.product_name FROM products p WHERE p.product_id = NEW.product_id), '');
--- (Existing lines are filled with the product's CURRENT name; names from before a rename cannot be recovered.)
